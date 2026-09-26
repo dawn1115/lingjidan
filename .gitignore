@@ -1,0 +1,56 @@
+# Auth & secrets
+auths/
+data/
+*.key
+*.pem
+*.env
+.env
+.env.*
+
+# Binaries (anchored to repo root only — bare "login"/"credit" would also ignore cmd/login/, cmd/credit/)
+/login
+/credit
+/lingjidan
+/signin_bin
+
+# Config with secrets (use config.example.json)
+config.json
+
+# Build artifacts
+*.tmp
+__pycache__/
+
+# 构建输出目录：bin/ 为本地编译产物，dist/ 为发布包（内含 exe、账号副本、
+# 含真实 api_key 的 config.json —— 虽被上方 auths/、config.json 规则覆盖，
+# 但 exe 与重复文件不应入库，整目录排除最稳妥）。
+/bin/
+/dist/
+
+# Backups (contains auth tokens)
+backups/
+
+# IDE
+.idea/
+.vscode/
+LOOP.md
+PLAN.md
+SPEC.md
+docs/
+
+# 设计/计划文档（但 README.md 必须进版本库）
+*.md
+!README.md
+
+# Windows binaries
+/lingjidan.exe
+/login.exe
+/credit.exe
+
+# 验证码求解器依赖（happy-dom，约 11MB）：随发布包分发，不入版本库；
+# solver.js / package.json / package-lock.json 必须入库（可复现安装）。
+captcha_node/node_modules/
+
+# 本地验证工具（判据逆向过程脚本，结论沉淀于 data/desktop-task-protocol.md）
+/cmd/desktopverify*/
+*.zip
+server.exe

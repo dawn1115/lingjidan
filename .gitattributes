@@ -1,0 +1,15 @@
+# 换行统一：仓库内一律存 LF。
+# 本项目在 Windows 上开发、在 Linux/Docker 上部署，若不统一，
+# .sh / Dockerfile 带 CRLF 会在容器里报 "bad interpreter: No such file or directory"。
+* text=auto eol=lf
+
+# 二进制文件不做换行转换
+*.exe   binary
+*.zip   binary
+*.png   binary
+*.jpg   binary
+*.ico   binary
+
+# Windows 批处理必须保留 CRLF
+*.bat   text eol=crlf
+*.cmd   text eol=crlf
