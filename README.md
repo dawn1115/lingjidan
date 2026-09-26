@@ -7,7 +7,7 @@
 <p align="center">
   <b>把多家上游账号池聚合成一个 OpenAI 兼容 API 的自托管网关 · 附 Web 管理面板</b><br>
   上游：腾讯 CodeBuddy + 智谱 Z.ai（GLM） · Web 面板 · OAuth 浏览器登录 · 账号池轮转 · 熔断与冷却 · 会话粘性<br>
-  定时签到 / 活跃 / 旅行 / 保活 · 成长任务一键完成（17/18） · 流式 / 非流式 · 全协议双向转换
+  定时鸡蛋签到 / 鸡蛋活跃 / 鸡蛋旅行 / 鸡蛋保活 · 成长任务一键完成（17/18） · 流式 / 非流式 · 全协议双向转换
 </p>
 
 <p align="center">
@@ -52,7 +52,7 @@
 | 🛡️ **熔断与冷却** | 429 软冷却 600s 起指数退避（封顶 `soft_rate_max`）、404 固定 60s 短冷却、余额耗尽硬冷却至次日 04:00、连续失败熔断、在途租约限流 |
 | 🎯 **模型级避让** | `(账号, 模型)` 负缓存：某模型在该账号不可用时只避该模型，不连坐同账号其它模型 |
 | 🧲 **会话粘性** | 同一会话（`conversation_id`）尽量绑定同一账号，TTL 滚动续期，失败自动解绑，可镜像 Redis 防重启丢失 |
-| ⏰ **定时任务** | 签到（09/21 点，末尾自动跑**连登管家**：兑换已解锁档位 + 抽完抽奖次数）+ 活跃上报（10 点）+ 猫猫旅行（09/21 点）+ token 保活（22 点）+ 夜猫子（23 点），五类独立开关（**仅 CodeBuddy 账号**，Z.ai 账号自动跳过） |
+| ⏰ **定时任务** | 鸡蛋签到（09/21 点，末尾自动跑**连登管家**：兑换已解锁档位 + 抽完抽奖次数）+ 鸡蛋活跃（10 点）+ 鸡蛋旅行（09/21 点）+ 鸡蛋保活（22 点）+ 鸡蛋夜补（23 点），五类独立开关（**仅 CodeBuddy 账号**，Z.ai 账号自动跳过） |
 | ⚡ **流式 + 非流式** | 出站强制 `stream:true`；SSE 帧按规范白名单重建；非流式由本地聚合为单响应 |
 | 🧠 **推理模型兼容** | DeepSeek 思维链注入（`thinking.type=enabled` + 默认档）、`reasoning_content` 多轮回填、effort 档位自动降级 |
 | 💬 **系统提示词体系** | 网关自有提示词替换客户端 system（默认 `custom`），从源头消灭 system 来源的内容误报；`passthrough` 遇拦截自动降级重试 |
@@ -63,7 +63,7 @@
 
 ## 上游：Z.ai（智谱 GLM）
 
-Z.ai 账号落在独立账号域 `zai`，与 CodeBuddy 账号**同池管理、完全隔离**：realm 谓词过滤选号，且不参与 CodeBuddy 的签到 / 任务 / 旅行 / 保活排程（对其无意义，也避免无谓的上游调用）。
+Z.ai 账号落在独立账号域 `zai`，与 CodeBuddy 账号**同池管理、完全隔离**：realm 谓词过滤选号，且不参与 CodeBuddy 的鸡蛋签到 / 任务 / 鸡蛋旅行 / 鸡蛋保活排程（对其无意义，也避免无谓的上游调用）。
 
 ### 两条通道
 
@@ -133,7 +133,7 @@ Plan 通道每个模型请求都必须携带 `X-Aliyun-Captcha-Verify-Param`（�
 |---|---|---|
 | `first_buddy` | +300c +8e | 解锁上报 → 同意协议 → 领养第一只 Buddy |
 | `create_canvas` | +300c +5e | 设计画布创建事件组（Ardot 遥测） |
-| `chat_5` | +100c | 对话活跃上报 ×5（自动补足差额） |
+| `chat_5` | +100c | 鸡蛋活跃 ×5（自动补足差额） |
 | `Model_chat_GLM5.2` | +100c +5e | glm-5.2 真实对话一次（发一条短消息） |
 | `RichMeow_Chat` | +100c +5e +UR Buddy | 桌面端对话事件链（6 事件，含成功回执） |
 | `Buddy_App` | +100c +5e | Buddy 应用「发现→进入→授权」事件链 |
@@ -173,7 +173,7 @@ Plan 通道每个模型请求都必须携带 `X-Aliyun-Captcha-Verify-Param`（�
 
 ### 开学季活动（5/5 全自动）
 
-官方「AI 好 Buddy，开学有好礼」小程序活动的 5 个任务**全部纯 API 自动完成**（挂签到排程末尾，幂等）：
+官方「AI 好 Buddy，开学有好礼」小程序活动的 5 个任务**全部纯 API 自动完成**（挂鸡蛋签到排程末尾，幂等）：
 
 | 任务 | 奖励（每日） | 判据（已逆向） |
 |---|---|---|
@@ -189,7 +189,7 @@ Plan 通道每个模型请求都必须携带 `X-Aliyun-Captcha-Verify-Param`（�
 
 ### 连登兑换与抽奖（自动）
 
-成长中心连登档位（连续登录 7/14/28 天）兑换后发放积分 / 能量 / 补签卡 / **抽奖次数**，抽奖次数只能从兑换获得。网关把它挂在每日签到排程末尾自动跑闭环（见[定时任务](#定时任务)）：档位解锁当天自动兑换、有抽奖次数自动抽完。
+成长中心连登档位（连续登录 7/14/28 天）兑换后发放积分 / 能量 / 补签卡 / **抽奖次数**，抽奖次数只能从兑换获得。网关把它挂在每日鸡蛋签到排程末尾自动跑闭环（见[定时任务](#定时任务)）：档位解锁当天自动兑换、有抽奖次数自动抽完。
 
 ## 与上游的差异
 
@@ -206,7 +206,7 @@ Plan 通道每个模型请求都必须携带 `X-Aliyun-Captcha-Verify-Param`（�
 | **积分任务体系** | 任务列表 / 接受 / 领取接口 + 面板弹窗；「一键完成」覆盖 **17 个任务**，推进进度、等待异步计分落定后**自动领奖**，纯 API 零客户端依赖 |
 | **首启自动生成配置** | 目录下无 `config.json` 时自动生成推荐配置（含 `crypto/rand` 随机 `api_key`），双击即开 |
 | **粘性会话内容回退** | 客户端不发 `conversation_id` 时，用 `system + 首条 user` 哈希派生会话键（`d-` 前缀），通用 OpenAI 客户端也能享受粘性 |
-| **余额后台刷新** | `schedule.balance_refresh_minutes`（默认 5）周期查余额并更新池，冷却账号余额恢复自动解冻 |
+| **鸡蛋余额刷新** | `schedule.balance_refresh_minutes`（默认 5）周期查余额并更新池，冷却账号余额恢复自动解冻 |
 | **模型能力透出** | `/v1/models` 附带 `supported_efforts` / `default_effort` / 积分倍率 / 输入输出上限等上游真实字段 |
 | **安全加固** | 常量时间密钥比较（`internal/httpauth`）、CSP 与安全响应头、UID 白名单防路径穿越、前端属性转义修复 |
 | **领养前置修复** | 上游 `travelAdopt` 缺 report 前置导致领养恒失败于 `first_buddy task not completed yet`；本分支修正后实测 +300 到账（3/3 账号） |
@@ -223,7 +223,7 @@ Plan 通道每个模型请求都必须携带 `X-Aliyun-Captcha-Verify-Param`（�
 | 净化增强 | `tool_calls.arguments` 盲区修复（content=null 的工具调用轮此前完全漏净化）、裸 `11-128` 反探测改写、桌面版身份句（逗号形态）漏网修复、反馈句整句改写 |
 | 出站头族 | UA 对齐官方三段式 `WorkBuddy/<ver> WorkBuddy/<ver> CLI/<ver>`（默认 5.5.4/2.137.1，可配）；`X-IDE-*` 用量归属四头 + `X-Agent-Purpose`；`X-Device-Token` 设备风控头（auth 每号 / config / 文件三源）；`X-IDE-Version` 补齐 |
 | 并发修复 | 客户端 IP 改按请求参数传递（消除共享字段竞态）；billing 单段 UA 形态 |
-| 签到幂等 | `IsAlreadyCheckin` 识别"今天已签到"（code=10001/14001），调度日志不再把重复签到当失败 |
+| 鸡蛋签到幂等 | `IsAlreadyCheckin` 识别"今天已签到"（code=10001/14001），调度日志不再把重复签到当失败 |
 | 粘性按模型判活 | 会话绑定的账号被 6004 模型级限额后，换模型请求自动解绑重分配；`/healthz` 探活计入模型豁免形态 |
 | report 增强 | `ReportChatActivity` 支持独立 `requestID`（同会话多轮上报各条可区分） |
 
@@ -235,7 +235,7 @@ Plan 通道每个模型请求都必须携带 `X-Aliyun-Captcha-Verify-Param`（�
 |---|---|---|
 | ❌ 未做 | **面板侧 Upstash / 凭证目录配置** | 涉及启动期装配，需手工编辑 `config.json`（面板会提示为重启项） |
 | ❌ 未做 | **HTTPS / 内置限流** | 设计上交给反向代理（Nginx / Caddy）。服务本身只提供明文 HTTP，公网部署**必须**置于 HTTPS 反代之后 |
-| ⚠️ 不支持 | **Z.ai 账号的成长任务 / 签到体系** | Z.ai 无对应活动接口，相关排程与面板入口对其自动跳过 |
+| ⚠️ 不支持 | **Z.ai 账号的成长任务 / 鸡蛋签到体系** | Z.ai 无对应活动接口，相关排程与面板入口对其自动跳过 |
 | ⚠️ 不支持 | **`Expert_Philanthropy`** | 需真实捐款（服务端校验捐赠回执，实测无法绕过） |
 
 ## 架构总览
@@ -249,7 +249,7 @@ flowchart LR
         H --> S
         P["账号池\n三因子加权 · 熔断 · 冷却 · 租约\n按 realm 分池"] --> U
         S["会话粘性路由"] -.绑定镜像.-> REDIS
-        T["定时调度\n签到 09/21 · 旅行 09/21 · 活跃 10 · 保活 22 · 夜猫子 23\n仅 CodeBuddy 域"] --> P
+        T["定时调度\n鸡蛋签到 09/21 · 鸡蛋旅行 09/21 · 鸡蛋活跃 10 · 鸡蛋保活 22 · 鸡蛋夜补 23\n仅 CodeBuddy 域"] --> P
         U["上游 Client\n协议转换 · 验证码求解"]
     end
 
@@ -342,7 +342,7 @@ CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o credit ./cmd/credit
 
 **A. CodeBuddy — Web 面板（推荐，各平台通用，免命令行）**
 
-打开 `http://127.0.0.1:7863/panel/`，点右上角「**添加账号**」：面板展示授权链接 → 浏览器完成登录 → 自动检测并落盘凭证 → **热加载进池（无需重启）**，顺带完成首次签到。
+打开 `http://127.0.0.1:7863/panel/`，点右上角「**添加账号**」：面板展示授权链接 → 浏览器完成登录 → 自动检测并落盘凭证 → **热加载进池（无需重启）**，顺带完成首次鸡蛋签到。
 
 **B. CodeBuddy — 命令行脚本（仅 Linux / macOS，依赖 bash + python3）**
 
@@ -351,7 +351,7 @@ CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o credit ./cmd/credit
 # 按提示在浏览器打开授权链接 → 回到终端确认 → 凭证落盘 auths/workbuddy-<uid>.json
 ```
 
-`login.sh` 内置授权 URL 获取 + 浏览器登录 + token 轮询 + 首次签到 + 凭证落盘 + 容器重启，全程无 PKCE（state 由服务端签发）。账号池在容器启动时用 `auths/` 目录自动对齐，新增凭证文件即自动发现。
+`login.sh` 内置授权 URL 获取 + 浏览器登录 + token 轮询 + 首次鸡蛋签到 + 凭证落盘 + 容器重启，全程无 PKCE（state 由服务端签发）。账号池在容器启动时用 `auths/` 目录自动对齐，新增凭证文件即自动发现。
 
 > Windows 用户请用方式 A（或 WSL）；`login.sh` 需要 python3。
 
@@ -398,22 +398,22 @@ curl -s http://localhost:7863/v1/chat/completions \
 | `state_file` | `./data/state.json` | 账号池状态持久化文件 |
 | `cooldown.soft_rate` | `600s` | 软限流（429 / 限流文案）冷却基数；同一账号连续触发按 2 倍指数退避 |
 | `cooldown.soft_rate_max` | `2h` | 软冷却指数退避封顶 |
-| `schedule.checkin_hours` | `[9, 21]` | 每日本地时区整点签到 + 余额查询解冻。空数组 / `null` = 未配置回落默认（不是禁用） |
-| `schedule.travel_hours` | `[9, 21]` | 每日本地时区整点推进猫猫旅行状态机（领养 / 派出 / 领奖） |
-| `schedule.activity_hours` | `[10]` | 每日本地时区整点对话活跃上报（点亮连登 + 解锁 `first_buddy`） |
-| `schedule.keepalive_hours` | `[22]` | 每日本地时区整点刷新 token 保活 |
-| `schedule.blackcat_hours` | `[23]` | 每日本地时区整点夜猫子补足（23:00–08:00 计数窗口） |
-| `schedule.checkin_enabled` | `true` | 签到总开关；`false` 真正关闭 |
-| `schedule.travel_enabled` | `true` | 猫猫旅行总开关（独立于签到） |
-| `schedule.activity_enabled` | `true` | 活跃上报总开关 |
-| `schedule.keepalive_enabled` | `true` | token 保活总开关 |
-| `schedule.blackcat_enabled` | `true` | 夜猫子总开关 |
-| `schedule.balance_refresh_enabled` | `true` | 余额后台刷新总开关 |
-| `schedule.balance_refresh_minutes` | `5` | 余额后台刷新间隔（分钟） |
+| `schedule.checkin_hours` | `[9, 21]` | 每日本地时区整点鸡蛋签到 + 余额查询解冻。空数组 / `null` = 未配置回落默认（不是禁用） |
+| `schedule.travel_hours` | `[9, 21]` | 每日本地时区整点推进鸡蛋旅行状态机（领养 / 派出 / 领奖） |
+| `schedule.activity_hours` | `[10]` | 每日本地时区整点鸡蛋活跃（点亮连登 + 解锁 `first_buddy`） |
+| `schedule.keepalive_hours` | `[22]` | 每日本地时区整点刷新鸡蛋保活 |
+| `schedule.blackcat_hours` | `[23]` | 每日本地时区整点鸡蛋夜补（23:00–08:00 计数窗口） |
+| `schedule.checkin_enabled` | `true` | 鸡蛋签到总开关；`false` 真正关闭 |
+| `schedule.travel_enabled` | `true` | 鸡蛋旅行总开关（独立于鸡蛋签到） |
+| `schedule.activity_enabled` | `true` | 鸡蛋活跃总开关 |
+| `schedule.keepalive_enabled` | `true` | 鸡蛋保活总开关 |
+| `schedule.blackcat_enabled` | `true` | 鸡蛋夜补总开关 |
+| `schedule.balance_refresh_enabled` | `true` | 鸡蛋余额刷新总开关 |
+| `schedule.balance_refresh_minutes` | `5` | 鸡蛋余额刷新间隔（分钟） |
 | `global.enabled` | `true` | global 域（国际版）路由开关。`false` 时不提供 `global:` 模型名（逃生门）；纯 CN 场景置 false 不改变 CN 行为 |
 | `global.chat_base` | 空 | global 域聊天 base 覆盖（空 = 内置默认） |
 | `global.billing_base` | 空 | global 域计费 base 覆盖（空 = 内置默认） |
-| `upstream.timeout_seconds` | `120` | 短 RPC（刷新 / 签到 / 余额 / 模型列表）总时长上限 |
+| `upstream.timeout_seconds` | `120` | 短 RPC（刷新 / 鸡蛋签到 / 余额 / 模型列表）总时长上限 |
 | `upstream.header_timeout_seconds` | 回落 `timeout_seconds` | 聊天首字节前（响应头）上限 |
 | `upstream.idle_timeout_seconds` | `300` | 聊天流中空闲上限（活跃续命，静默断流） |
 | `upstream.user_agent` | 空 | 出站 User-Agent 覆盖（空 = 现状 `CLI/2.63.2 CodeBuddy/2.63.2`） |
@@ -442,7 +442,7 @@ curl -s http://localhost:7863/v1/chat/completions \
 
 | 字段 | 作用对象 | 默认 | 行为 |
 |---|---|---|---|
-| `timeout_seconds` | 短 RPC（token 刷新 / 签到 / 余额 / 模型列表） | `120` | 总时长硬上限，到期报错走换号 / 熔断 |
+| `timeout_seconds` | 短 RPC（token 刷新 / 鸡蛋签到 / 余额 / 模型列表） | `120` | 总时长硬上限，到期报错走换号 / 熔断 |
 | `header_timeout_seconds` | 聊天 SSE **首字节前** | `120` | 由 `Transport.ResponseHeaderTimeout` 约束；超时 = 换号重发 |
 | `idle_timeout_seconds` | 聊天 SSE **流中空闲** | `300` | 活跃吐数据续命不掐；静默超时才断流释放租约 |
 
@@ -489,7 +489,7 @@ curl -s http://localhost:7863/v1/chat/completions \
 
 | 分类 | 触发条件 | 账号处置 | 恢复 |
 |---|---|---|---|
-| 余额不足 | HTTP 402 / body 含余额关键词 / Z.ai `code 1113` | 硬冷却到**次日 04:00**（本地时区） | 签到（09/21 点）余额恢复自动解冻 |
+| 余额不足 | HTTP 402 / body 含余额关键词 / Z.ai `code 1113` | 硬冷却到**次日 04:00**（本地时区） | 鸡蛋签到（09/21 点）余额恢复自动解冻 |
 | 模型级额度耗尽 | Z.ai `code 1005`（`exceed quota limit`） | `(账号, 模型)` 负缓存避让，**不连坐**同账号其它模型 | 避让 TTL 到期 / 额度重置 |
 | 频控 | HTTP 429 / 限流文案（不限状态码） | 软冷却 `soft_rate`（600s 起，连续触发指数退避，封顶 `soft_rate_max`）。**`code 6004`（模型级）带「将在 … 重置」时**冷却到上游重置墙钟并豁免切模型 | 到期自动恢复 / 成功清零退避 |
 | 上游风控 | Z.ai `code 3012`（`unusual activity`） | 账号软冷却 + IP 级 fail-fast（短窗多号命中即终止轮转） | 窗口过后自动解除 |
@@ -505,7 +505,7 @@ curl -s http://localhost:7863/v1/chat/completions \
 
 **熔断器**：所有冷却入口与 5xx 共用唯一连续失败计数器 `fails`；累计达 `breaker_threshold`（默认 3）触发熔断，退避 `breaker_cooldown × 2^retryCount`，封顶 `6h`；成功清零。
 
-**软冷却指数退避**（与熔断器并存的第二条升级线）：软限流的**冷却时长**本身也按连续次数退避——`soft_rate × 2^(连续次数-1)`，封顶 `soft_rate_max`。计数 `soft_streak` 独立于熔断器的 `fails`，只在**成功**或**签到解冻**时清零，随 `state.json` 持久化。
+**软冷却指数退避**（与熔断器并存的第二条升级线）：软限流的**冷却时长**本身也按连续次数退避——`soft_rate × 2^(连续次数-1)`，封顶 `soft_rate_max`。计数 `soft_streak` 独立于熔断器的 `fails`，只在**成功**或**鸡蛋签到解冻**时清零，随 `state.json` 持久化。
 
 ### 选号策略
 
@@ -535,30 +535,30 @@ curl -s http://localhost:7863/v1/chat/completions \
 
 | 任务 | 开关（默认 true） | 时刻（默认） | 行为 |
 |---|---|---|---|
-| 签到 | `schedule.checkin_enabled` | `checkin_hours` `[9, 21]` 整点 | 签到 + 余额查询；余额恢复则解冻冷却账号。**末尾追加连登管家** |
-| 活跃上报 | `schedule.activity_enabled` | `activity_hours` `[10]` 整点 | 对话活跃上报（`chat_request_send` 事件）；点亮连登 + 解锁 `first_buddy`；每号每天 1 次 |
-| 猫猫旅行 | `schedule.travel_enabled` | `travel_hours` `[9, 21]` 整点 | 独立排程：无猫领养 / `idle` 派出 / `arrived` 领奖 |
-| 保活 | `schedule.keepalive_enabled` | `keepalive_hours` `[22]` 整点 | 全账号刷新 token；session 失效**连续 3 次**才自动禁用 |
-| 夜猫子 | `schedule.blackcat_enabled` | `blackcat_hours` `[23]` 整点 | **先查任务进度再决定**：`black_cat` 未达标才在 23:00–08:00 窗口内补足 glm-5.2 短对话 |
+| 鸡蛋签到 | `schedule.checkin_enabled` | `checkin_hours` `[9, 21]` 整点 | 鸡蛋签到 + 余额查询；余额恢复则解冻冷却账号。**末尾追加连登管家** |
+| 鸡蛋活跃 | `schedule.activity_enabled` | `activity_hours` `[10]` 整点 | 鸡蛋活跃（`chat_request_send` 事件）；点亮连登 + 解锁 `first_buddy`；每号每天 1 次 |
+| 鸡蛋旅行 | `schedule.travel_enabled` | `travel_hours` `[9, 21]` 整点 | 独立排程：无猫领养 / `idle` 派出 / `arrived` 领奖 |
+| 鸡蛋保活 | `schedule.keepalive_enabled` | `keepalive_hours` `[22]` 整点 | 全账号刷新 token；session 失效**连续 3 次**才自动禁用 |
+| 鸡蛋夜补 | `schedule.blackcat_enabled` | `blackcat_hours` `[23]` 整点 | **先查任务进度再决定**：`black_cat` 未达标才在 23:00–08:00 窗口内补足 glm-5.2 短对话 |
 
 **关闭定时任务**：用 `schedule.*_enabled: false` 显式关闭（五个都设 `false` 则调度器不空转，直接阻塞等待退出信号）。注意三点语义：
 
 - **空数组与 `null` 表示「未配置 → 回落默认」**，不是「禁用」；真正关闭请用 `*_enabled: false`
 - **禁用不会擦除小时配置**：`*_hours` 原样保留，改回 `true` 即恢复原时点；小时值必须是 0-23，非法值启动即报错
-- 关签到会把「余额恢复即解冻」一起关掉，被硬冷却的账号只能等次日 04:00 自然到期
+- 关鸡蛋签到会把「余额恢复即解冻」一起关掉，被硬冷却的账号只能等次日 04:00 自然到期
 
-#### 余额后台刷新
+#### 鸡蛋余额刷新
 
-`schedule.balance_refresh_enabled`（缺省开启）：每 `balance_refresh_minutes`（缺省 5）分钟并发查询全部账号余额并更新池内积分——两次签到时点之间 credits 保持新鲜，余额恢复的冷却账号也会自动解冻（语义同签到，但不做签到不刷 token）。面板「刷新」按钮也是全量刷余额；5 秒自动轮询只读内存，不打上游。
+`schedule.balance_refresh_enabled`（缺省开启）：每 `balance_refresh_minutes`（缺省 5）分钟并发查询全部账号余额并更新池内积分——两次鸡蛋签到时点之间 credits 保持新鲜，余额恢复的冷却账号也会自动解冻（语义同鸡蛋签到，但不做鸡蛋签到不刷 token）。面板「刷新」按钮也是全量刷余额；5 秒自动轮询只读内存，不打上游。
 
-#### 连登管家（签到排程末尾自动执行）
+#### 连登管家（鸡蛋签到排程末尾自动执行）
 
-成长中心的连登档位（连续登录 7/14/28 天）兑换后发放积分 / 能量 / 补签卡 / **抽奖次数**，抽奖次数只能从兑换获得。管家在每日签到后自动跑一遍闭环（幂等，未解锁静默跳过）：
+成长中心的连登档位（连续登录 7/14/28 天）兑换后发放积分 / 能量 / 补签卡 / **抽奖次数**，抽奖次数只能从兑换获得。管家在每日鸡蛋签到后自动跑一遍闭环（幂等，未解锁静默跳过）：
 
 1. 查连登档位状态 → 已解锁的档位自动**兑换**
 2. 查抽奖次数 → **有次数自动全部抽完**，奖品记日志（`streak-bonus <uid>: 🎲 …`）
 
-#### 活跃上报（独立排程）
+#### 鸡蛋活跃（独立排程）
 
 - 一条上报同时点亮 growth 连登 + 解锁 `first_buddy` 任务（领养前置）
 - 每号每天 1 次即可；日活跃奖励按天去重，重复上报无额外收益
@@ -566,7 +566,7 @@ curl -s http://localhost:7863/v1/chat/completions \
 - **streak 自检**：上报成功后回读连登天数（只读 oracle），日志每号一行可 grep：`activity <uid>: streak days=N`。`days=0` 记 warn（对应上游「200 但静默丢弃」）
 - 手动诊断 / 补跑用 `python3 scripts/probe_active.py`（只读探测；写操作默认 dry-run，需 `--yes`）
 
-#### 猫猫旅行（独立排程）
+#### 鸡蛋旅行（独立排程）
 
 对池内每个可用账号在 `travel_hours` 单趟推进一次，每趟只做一个动作，不轮询不等待。
 
@@ -577,7 +577,7 @@ curl -s http://localhost:7863/v1/chat/completions \
 | `state=arrived` | 领取到站奖励（带 `record_id`） |
 | `state=traveling` / 今日已达上限 / 未知状态 | 跳过 |
 
-- 领养门槛未达标时上游返回 HTTP 400，每账号每自然日只尝试一次；门槛可用活跃上报解除
+- 领养门槛未达标时上游返回 HTTP 400，每账号每自然日只尝试一次；门槛可用鸡蛋活跃解除
 - 每自然日 1 次派出：按 CST（Asia/Shanghai）自然日重置，与容器 `TZ` 无关
 - 失败隔离：单账号失败只跳过该账号当趟；401 不强刷
 
@@ -614,25 +614,25 @@ curl -s http://localhost:7863/v1/chat/completions \
 上游接口均为 CodeBuddy 官方 CLI / 插件使用的**非公开 / 逆向接口**，未见公开 API 文档。两类 base：
 
 - **`copilot.tencent.com`**：聊天补全（SSE）、token 刷新、OAuth、模型列表、growth 域（旅行 / streak）
-- **`www.codebuddy.cn`**：每日签到、余额查询、活跃上报
+- **`www.codebuddy.cn`**：每日鸡蛋签到、余额查询、鸡蛋活跃
 
 | 相对路径 | 方法 | 用途 |
 |---|---|---|
 | `chat/completions` | POST | 聊天补全（SSE） |
 | `console/enterprises/personal/models` | GET | 动态模型列表 |
 | `plugin/auth/token/refresh` | POST | token 刷新 |
-| `billing/meter/daily-checkin` | POST | 每日签到 |
+| `billing/meter/daily-checkin` | POST | 每日鸡蛋签到 |
 | `billing/meter/get-user-resource` | POST | 余额查询 |
-| `report` | POST | 对话活跃上报（`chat_request_send` 事件数组，必须含 `userId`） |
+| `report` | POST | 鸡蛋活跃（`chat_request_send` 事件数组，必须含 `userId`） |
 | `plugin/auth/state?platform=CLI` | POST | OAuth 取授权 URL |
 | `plugin/auth/token?state=` | GET | OAuth 轮询取 token |
 | `plugin/login/account?state=` | GET | OAuth 取账号信息 |
-| `activity/growth/buddy/agreement` | POST | 猫猫旅行：同意协议（幂等） |
-| `activity/growth/buddy/first` | POST | 猫猫旅行：首次领养 |
-| `activity/growth/buddy/info` | GET | 猫猫旅行：查询猫档案 |
-| `activity/growth/buddy/travel/status` | GET | 猫猫旅行：旅行状态 |
-| `activity/growth/buddy/travel/depart` | POST | 猫猫旅行：派出 |
-| `activity/growth/buddy/travel/claim` | POST | 猫猫旅行：领奖 |
+| `activity/growth/buddy/agreement` | POST | 鸡蛋旅行：同意协议（幂等） |
+| `activity/growth/buddy/first` | POST | 鸡蛋旅行：首次领养 |
+| `activity/growth/buddy/info` | GET | 鸡蛋旅行：查询猫档案 |
+| `activity/growth/buddy/travel/status` | GET | 鸡蛋旅行：旅行状态 |
+| `activity/growth/buddy/travel/depart` | POST | 鸡蛋旅行：派出 |
+| `activity/growth/buddy/travel/claim` | POST | 鸡蛋旅行：领奖 |
 | `activity/growth/streak` | GET | 连登天数 + 兑换档位状态 |
 | `activity/growth/redeem` | POST | 连登档位兑换（未解锁 403） |
 | `activity/growth/lottery/summary` | GET | 抽奖次数查询 |
@@ -662,11 +662,11 @@ http://127.0.0.1:7863/panel/
 
 | 视图 | 功能 |
 |---|---|
-| **账号池** | 统计条（总数/可用/冷却/禁用/积分合计/粘性会话）+ 账号表：状态标签、积分量条、成功失败计数、在途、realm 标识、单号操作（签到/余额/任务/解冻/禁用/移除）；批量「全部签到」「旅行巡检」「活跃上报」「全部保活」 |
+| **账号池** | 统计条（总数/可用/冷却/禁用/积分合计/粘性会话）+ 账号表：状态标签、积分量条、成功失败计数、在途、realm 标识、单号操作（鸡蛋签到/余额/任务/解冻/禁用/移除）；批量「全部鸡蛋签到」「鸡蛋旅行巡检」「鸡蛋活跃」「全部鸡蛋保活」 |
 | **添加账号** | 浏览器内完成 CodeBuddy OAuth 设备授权；**「Z.ai 令牌」标签**粘贴凭证 JSON 导入 Z.ai 账号 |
 | **积分任务** | 展示全部任务（进度 / 奖励 / 状态）；「全部接受」批量报名；「一键完成」覆盖 **17 个任务**（推进 + 异步计分等待 + 自动领奖，幂等） |
 | **任务中心** | 全账号任务扫描 + 执行队列 + 开学季状态卡（见[任务中心](#任务中心面板视图)） |
-| **模型与档位** | 实时查询上游：每模型的积分倍率、默认思考档、支持的档位、上下文长度与最大输出；含探测数据时显示**实测上限与钳制告警** |
+| **模型与档位** | **按来源分栏**（腾讯中文版 / 腾讯国际版 / z.ai 中文版，带各来源模型数）：实时查询上游每模型的积分倍率、默认思考档、支持的档位、上下文长度与最大输出；含探测数据时显示**实测上限与钳制告警** |
 | **配置** | 在线编辑 config.json：API 密钥、定时任务、账号池与流量治理、上游超时与 UA、提示词模式、脱敏/粘性开关 |
 | **运行日志** | 最近 500 行服务日志 + 请求表格日志（任务/对话/系统分频道） |
 
@@ -720,9 +720,9 @@ http://127.0.0.1:7863/panel/
 | 脚本 | 用途 |
 |---|---|
 | `./login.sh` | OAuth 登录 → 落盘 auth → 重启容器 |
-| `./signin.sh [auths_dir]` | 批量签到（过期先刷新） |
+| `./signin.sh [auths_dir]` | 批量鸡蛋签到（过期先刷新） |
 | `./credit.sh` / `./credit.sh -json` | 积分日报（美化 / 原始 JSON） |
-| `python3 scripts/probe_active.py` | 活跃上报手动诊断 / 补跑（写操作默认 dry-run，需 `--yes`） |
+| `python3 scripts/probe_active.py` | 鸡蛋活跃手动诊断 / 补跑（写操作默认 dry-run，需 `--yes`） |
 | `python3 scripts/probe_max_tokens.py` | 探测各模型**真实输出上限**（见下节） |
 | `captcha_node/solver.js` | Z.ai 验证码求解器（由网关按子进程调用，通常无需手工执行） |
 

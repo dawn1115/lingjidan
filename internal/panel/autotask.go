@@ -129,7 +129,7 @@ var autoActions = []autoAction{
 	},
 	{
 		TaskCode: "black_cat",
-		Desc:     "夜猫子：23:00–08:00 窗口内 glm-5.2 对话补足（窗口外提示稍后再试）",
+		Desc:     "鸡蛋夜补：23:00–08:00 窗口内 glm-5.2 对话补足（窗口外提示稍后再试）",
 		Attempt:  true,
 		run:      runBlackCat,
 	},
@@ -862,7 +862,7 @@ func runLibraryRead(p *Panel, a *auth.Auth) (string, error) {
 	return "已上报资料库介绍阅读事件", nil
 }
 
-// runBlackCat 完成 black_cat（夜猫子，夜间 23:00–08:00 计数）。
+// runBlackCat 完成 black_cat（鸡蛋夜补，夜间 23:00–08:00 计数）。
 // 判据 = 夜间窗口内 glm-5.2 真实对话 + chat 事件上报（WorkBuddy-Daily 实测口径）。
 // 窗口外不做（提示等排程）；网关 blackcat_hours（默认 23 点）排程会自动补足。
 func runBlackCat(p *Panel, a *auth.Auth) (string, error) {

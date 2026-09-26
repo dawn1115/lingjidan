@@ -178,38 +178,38 @@ func main() {
 	})
 	switch {
 	case !cfg.Schedule.CheckinEnabled:
-		log.Printf("签到已禁用（schedule.checkin_enabled=false）")
+		log.Printf("鸡蛋签到已禁用（schedule.checkin_enabled=false）")
 	default:
-		log.Printf("签到已启用：%v 点（签到 + 余额查询解冻）", cfg.Schedule.CheckinHours)
+		log.Printf("鸡蛋签到已启用：%v 点（鸡蛋签到 + 余额查询解冻）", cfg.Schedule.CheckinHours)
 	}
 	switch {
 	case !cfg.Schedule.TravelEnabled:
-		log.Printf("猫猫旅行已禁用（schedule.travel_enabled=false）")
+		log.Printf("鸡蛋旅行已禁用（schedule.travel_enabled=false）")
 	default:
-		log.Printf("猫猫旅行已启用：%v 点（独立排程：领养 / 派出 / 领奖）", cfg.Schedule.TravelHours)
+		log.Printf("鸡蛋旅行已启用：%v 点（独立排程：领养 / 派出 / 领奖）", cfg.Schedule.TravelHours)
 	}
 	switch {
 	case !cfg.Schedule.ActivityEnabled:
-		log.Printf("活跃上报已禁用（schedule.activity_enabled=false）")
+		log.Printf("鸡蛋活跃已禁用（schedule.activity_enabled=false）")
 	default:
-		log.Printf("活跃上报已启用：%v 点（每日 1 次，点亮连登 + 解锁 first_buddy）", cfg.Schedule.ActivityHours)
+		log.Printf("鸡蛋活跃已启用：%v 点（每日 1 次，点亮连登 + 解锁 first_buddy）", cfg.Schedule.ActivityHours)
 	}
 	if !cfg.Schedule.KeepaliveEnabled {
-		log.Printf("token 保活已禁用（schedule.keepalive_enabled=false）")
+		log.Printf("鸡蛋保活已禁用（schedule.keepalive_enabled=false）")
 	} else {
-		log.Printf("token 保活已启用：%v 点", cfg.Schedule.KeepaliveHours)
+		log.Printf("鸡蛋保活已启用：%v 点", cfg.Schedule.KeepaliveHours)
 	}
 	switch {
 	case !cfg.Schedule.BlackcatEnabled:
-		log.Printf("夜猫子已禁用（schedule.blackcat_enabled=false）")
+		log.Printf("鸡蛋夜补已禁用（schedule.blackcat_enabled=false）")
 	default:
-		log.Printf("夜猫子已启用：%v 点（23:00–08:00 窗口 glm-5.2 对话补足）", cfg.Schedule.BlackcatHours)
+		log.Printf("鸡蛋夜补已启用：%v 点（23:00–08:00 窗口 glm-5.2 对话补足）", cfg.Schedule.BlackcatHours)
 	}
 	switch {
 	case !cfg.Schedule.BalanceRefreshEnabled:
-		log.Printf("余额后台刷新已禁用（schedule.balance_refresh_enabled=false）")
+		log.Printf("鸡蛋余额刷新已禁用（schedule.balance_refresh_enabled=false）")
 	case cfg.BalanceRefreshInterval > 0:
-		log.Printf("余额后台刷新：每 %s（签到时点照常额外刷新）", cfg.BalanceRefreshInterval)
+		log.Printf("鸡蛋余额刷新：每 %s（鸡蛋签到时点照常额外刷新）", cfg.BalanceRefreshInterval)
 	}
 
 	// 管理面板日志镜像：标准 log（stderr）与 chat 表格日志（stdout）双路复制进

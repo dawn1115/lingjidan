@@ -200,7 +200,7 @@ function renderAccounts(list) {
       '</span></td>' +
       '<td class="num" style="color:var(--ink-3)">' + ago(s.last_success) + '</td>' +
       '<td class="acts">' +
-        '<button class="xs ghost" data-a="checkin" data-u="' + esc(s.uid) + '">签到</button>' +
+        '<button class="xs ghost" data-a="checkin" data-u="' + esc(s.uid) + '">鸡蛋签到</button>' +
         '<button class="xs ghost" data-a="balance" data-u="' + esc(s.uid) + '">余额</button>' +
         '<button class="xs ghost" data-a="tasks" data-u="' + esc(s.uid) + '">任务</button>' +
         (frozen ? '<button class="xs primary" data-a="revive" data-u="' + esc(s.uid) + '">解冻</button>'
@@ -245,7 +245,7 @@ $('accBody').addEventListener('click', async ev => {
   try {
     if (a === 'checkin') {
       const r = await api('accounts/' + encodeURIComponent(u) + '/checkin', { method: 'POST' });
-      toast('签到完成' + (r.credits != null ? '，积分 ' + r.credits + (r.credits_total > 0 ? '/' + r.credits_total : '') : '') + (r.checkin_message ? '（' + r.checkin_message + '）' : ''), 'ok');
+      toast('鸡蛋签到完成' + (r.credits != null ? '，积分 ' + r.credits + (r.credits_total > 0 ? '/' + r.credits_total : '') : '') + (r.checkin_message ? '（' + r.checkin_message + '）' : ''), 'ok');
     } else if (a === 'balance') {
       const r = await api('accounts/' + encodeURIComponent(u) + '/balance', { method: 'POST' });
       toast('余额已更新：' + r.credits + (r.credits_total > 0 ? ' / ' + r.credits_total : ''), 'ok');
@@ -266,19 +266,19 @@ $('accBody').addEventListener('click', async ev => {
 });
 
 $('btnCheckinAll').onclick = async () => {
-  try { await api('checkin_all', { method: 'POST' }); toast('全部签到已开始，结果见日志', 'ok'); }
+  try { await api('checkin_all', { method: 'POST' }); toast('全部鸡蛋签到已开始，结果见日志', 'ok'); }
   catch (e) { toast(e.message, 'err'); }
 };
 $('btnKeepaliveAll').onclick = async () => {
-  try { await api('keepalive_all', { method: 'POST' }); toast('全部保活已开始，结果见日志', 'ok'); }
+  try { await api('keepalive_all', { method: 'POST' }); toast('全部鸡蛋保活已开始，结果见日志', 'ok'); }
   catch (e) { toast(e.message, 'err'); }
 };
 $('btnTravelAll').onclick = async () => {
-  try { await api('travel_all', { method: 'POST' }); toast('旅行巡检已开始（含领养链路），结果见日志', 'ok'); }
+  try { await api('travel_all', { method: 'POST' }); toast('鸡蛋旅行巡检已开始（含领养链路），结果见日志', 'ok'); }
   catch (e) { toast(e.message, 'err'); }
 };
 $('btnActivityAll').onclick = async () => {
-  try { await api('activity_all', { method: 'POST' }); toast('活跃上报已开始，结果见日志', 'ok'); }
+  try { await api('activity_all', { method: 'POST' }); toast('鸡蛋活跃已开始，结果见日志', 'ok'); }
   catch (e) { toast(e.message, 'err'); }
 };
 
@@ -332,44 +332,119 @@ function rateCell(m) {
   return m.credits ? esc(m.credits) : '—';
 }
 
+/* 按来源分栏：腾讯中文版 cn / 腾讯国际版 global / z.ai 中文版 zai。
+   /panel/api/models 的 id 已带 realm 前缀（cn:glm-5.2），按前缀分组即可，后端无需改动。
+   一次拉全量后本地切分——切栏不重新打上游（该接口是实时查询，代价不低）。 */
+const MD_REALMS = [
+  { key: 'cn', label: '腾讯中文版' },
+  { key: 'global', label: '腾讯国际版' },
+  { key: 'zai', label: 'z.ai 中文版' },
+];
+let mdRealm = localStorage.getItem('md.realm') || 'cn';
+if (!MD_REALMS.some(r => r.key === mdRealm)) mdRealm = 'cn';
+let mdList = [], mdProbes = {};
+
+const mdRealmOf = id => String(id || '').split(':')[0];
+const mdTabEls = () => Array.from(document.querySelectorAll('#mdTabs .tab'));
+const mdProbeOf = id => {
+  const keys = Object.keys(mdProbes);
+  return mdProbes[id] || mdProbes[keys.find(k => k.endsWith(':' + id))];
+};
+
+/* 行模板（与分栏无关，原样保留）。 */
+function mdRow(m) {
+  const eff = (m.supported_efforts || []).slice();
+  if (m.can_disable_thinking && eff.length && !eff.includes('off')) eff.push('off（可关）');
+  const effs = eff.length ? eff.map(e => '<span class="tag warn">' + esc(e) + '</span>').join(' ')
+    : '<span style="color:var(--ink-3);font-size:12.5px">' + (m.supports_reasoning ? '固定档 · 默认 ' + esc(m.default_effort || '?') : '不支持思考') + '</span>';
+  // 能力徽标：默认模型 / 工具调用 / 视觉 / 纯推理（上游目录全字段透出，缺失不显示）
+  const caps = [];
+  if (m.is_default) caps.push('<span class="tag ok">默认</span>');
+  if (m.supports_tool_call) caps.push('<span class="tag warn">工具</span>');
+  if (m.supports_images) caps.push('<span class="tag warn">视觉</span>');
+  if (m.supports_reasoning && !m.can_disable_thinking) caps.push('<span class="tag warn">思考常开</span>');
+  const capHtml = caps.length ? '<div class="id" style="margin-top:2px">' + caps.join(' ') + '</div>' : '';
+  const tip = m.description ? ' title="' + esc(m.description) + '"' : '';
+  return '<tr><td class="mark" aria-hidden="true"><i></i></td><td class="who"' + tip + '><div class="nm">' + esc(m.id) + '</div><div class="id">' + esc(m.name || '') + '</div>' + capHtml + '</td>' +
+    '<td class="num">' + rateCell(m) + '</td>' +
+    '<td>' + (m.default_effort ? '<span class="tag ok">' + esc(m.default_effort) + '</span>' : '<span style="color:var(--ink-3)">—</span>') + '</td>' +
+    '<td class="efs" style="white-space:normal">' + effs + '</td>' +
+    '<td class="num">' + (m.context_length ? Math.round(m.context_length / 1000) + 'K' : '—') + '</td>' +
+    outCell(m, mdProbeOf(m.id)) + '</tr>';
+}
+
+/* 只渲染当前来源的行。计数写进标签徽标（各来源各有多少一眼可见），
+   选中态用 roving tabindex——键盘 Tab 只停在当前栏，方向键在栏间移动。 */
+function renderMdTabs() {
+  const n = {};
+  mdList.forEach(m => { const k = mdRealmOf(m.id); n[k] = (n[k] || 0) + 1; });
+  mdTabEls().forEach(b => {
+    const r = MD_REALMS.find(x => x.key === b.dataset.realm);
+    b.innerHTML = esc(r.label) + '<span class="n">' + (n[b.dataset.realm] || 0) + '</span>';
+    const on = b.dataset.realm === mdRealm;
+    b.classList.toggle('on', on);
+    b.setAttribute('aria-selected', on ? 'true' : 'false');
+    b.tabIndex = on ? 0 : -1;
+    if (on) $('mdPanel').setAttribute('aria-labelledby', b.id);
+  });
+}
+
+function renderMdRows() {
+  const tb = $('mdBody');
+  const rows = mdList.filter(m => mdRealmOf(m.id) === mdRealm);
+  if (!rows.length) {
+    const label = (MD_REALMS.find(r => r.key === mdRealm) || {}).label || mdRealm;
+    // 空状态分两种成因写清：没账号 vs 有账号但上游没返回，避免误判成网关故障
+    tb.innerHTML = '<tr><td colspan="7"><div class="empty"><div class="big">' + esc(label) + ' 暂无模型</div>' +
+      '该来源没有可用账号，或账号可用但上游未返回模型目录</div></td></tr>';
+    return;
+  }
+  tb.innerHTML = rows.map(mdRow).join('');
+}
+
+function setMdRealm(key, focus) {
+  if (!MD_REALMS.some(r => r.key === key)) return;
+  mdRealm = key;
+  localStorage.setItem('md.realm', key);
+  renderMdTabs();
+  if (focus) { const b = mdTabEls().find(x => x.dataset.realm === key); if (b) b.focus(); }
+  renderMdRows();
+}
+
 async function loadModels() {
   const tb = $('mdBody');
   tb.innerHTML = '<tr><td colspan="7"><div class="empty">正在向上游查询…</div></td></tr>';
   try {
     // 探测数据是可选增强：拉取失败不影响模型列表本身
     const [d, pr] = await Promise.all([api('models'), api('model_probes').catch(() => ({}))]);
-    const list = d.models || [];
-    if (!list.length) { tb.innerHTML = '<tr><td colspan="7"><div class="empty">上游未返回模型</div></td></tr>'; return; }
-    const probes = pr.probes || {};
-    const probeKeys = Object.keys(probes);
-    const probeOf = id => probes[id] || probes[probeKeys.find(k => k.endsWith(':' + id))];
-    tb.innerHTML = list.map(m => {
-      const eff = (m.supported_efforts || []).slice();
-      if (m.can_disable_thinking && eff.length && !eff.includes('off')) eff.push('off（可关）');
-      const effs = eff.length ? eff.map(e => '<span class="tag warn">' + esc(e) + '</span>').join(' ')
-        : '<span style="color:var(--ink-3);font-size:12.5px">' + (m.supports_reasoning ? '固定档 · 默认 ' + esc(m.default_effort || '?') : '不支持思考') + '</span>';
-      // 能力徽标：默认模型 / 工具调用 / 视觉 / 纯推理（上游目录全字段透出，缺失不显示）
-      const caps = [];
-      if (m.is_default) caps.push('<span class="tag ok">默认</span>');
-      if (m.supports_tool_call) caps.push('<span class="tag warn">工具</span>');
-      if (m.supports_images) caps.push('<span class="tag warn">视觉</span>');
-      if (m.supports_reasoning && !m.can_disable_thinking) caps.push('<span class="tag warn">思考常开</span>');
-      const capHtml = caps.length ? '<div class="id" style="margin-top:2px">' + caps.join(' ') + '</div>' : '';
-      const tip = m.description ? ' title="' + esc(m.description) + '"' : '';
-      return '<tr><td class="mark" aria-hidden="true"><i></i></td><td class="who"' + tip + '><div class="nm">' + esc(m.id) + '</div><div class="id">' + esc(m.name || '') + '</div>' + capHtml + '</td>' +
-        '<td class="num">' + rateCell(m) + '</td>' +
-        '<td>' + (m.default_effort ? '<span class="tag ok">' + esc(m.default_effort) + '</span>' : '<span style="color:var(--ink-3)">—</span>') + '</td>' +
-        '<td class="efs" style="white-space:normal">' + effs + '</td>' +
-        '<td class="num">' + (m.context_length ? Math.round(m.context_length / 1000) + 'K' : '—') + '</td>' +
-        outCell(m, probeOf(m.id)) + '</tr>';
-    }).join('');
-    const hit = list.filter(m => probeOf(m.id)).length;
-    $('mdNote').textContent = list.length + ' 个模型 · 已刷新降级缓存' + (hit ? ' · ' + hit + ' 个有实测上限' : '');
+    mdList = d.models || [];
+    mdProbes = pr.probes || {};
+    renderMdTabs();
+    if (!mdList.length) {
+      tb.innerHTML = '<tr><td colspan="7"><div class="empty">上游未返回模型</div></td></tr>';
+      return;
+    }
+    renderMdRows();
+    const hit = mdList.filter(m => mdProbeOf(m.id)).length;
+    $('mdNote').textContent = '共 ' + mdList.length + ' 个模型 · 已刷新降级缓存' + (hit ? ' · ' + hit + ' 个有实测上限' : '');
   } catch (e) {
     tb.innerHTML = '<tr><td colspan="7"><div class="empty">' + esc(e.message) + '</div></td></tr>';
   }
 }
 $('btnModels').onclick = loadModels;
+/* 分栏交互：点击切换 + 方向键/Home/End 在栏间移动（tablist 的标准键盘模型）。 */
+mdTabEls().forEach(b => { b.onclick = () => setMdRealm(b.dataset.realm); });
+$('mdTabs').addEventListener('keydown', ev => {
+  const i = MD_REALMS.findIndex(r => r.key === mdRealm);
+  let j = -1;
+  if (ev.key === 'ArrowRight' || ev.key === 'ArrowDown') j = (i + 1) % MD_REALMS.length;
+  else if (ev.key === 'ArrowLeft' || ev.key === 'ArrowUp') j = (i - 1 + MD_REALMS.length) % MD_REALMS.length;
+  else if (ev.key === 'Home') j = 0;
+  else if (ev.key === 'End') j = MD_REALMS.length - 1;
+  if (j < 0) return;
+  ev.preventDefault();
+  setMdRealm(MD_REALMS[j].key, true);
+});
 
 /* ── 日志（频道：全部/任务/对话/系统） ─────────────────────────────── */
 let logCh = 'all';
@@ -702,7 +777,7 @@ const AUTO_TASKS = {
   'expert_5': '真实专家召唤+使用链 ×5（专家市场+真实 chat，三账号实测点亮）',
   'Expert_team_use_3': '真实专家团召唤+使用链 ×3（三账号实测点亮）',
   'Hp_Appearance': '设置主题 API + 皮肤生效事件（两账号实测点亮）',
-  'black_cat': '夜猫子：23:00–08:00 窗口内 glm-5.2 对话补足（窗口外提示等 23 点排程）',
+  'black_cat': '鸡蛋夜补：23:00–08:00 窗口内 glm-5.2 对话补足（窗口外提示等 23 点排程）',
   'Expert_lighthouse': '真实轻量云专家召唤+使用链（真实对话 requestId，两账号实测点亮）',
   'skill_1': '真实对话 + skill_info 技能加载事件（实测点亮）',
   'school_season': '校园日（小程序口径）：accept → mini 对话+activityId 上报 → 领奖（+100c+5e）',

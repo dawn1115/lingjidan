@@ -1,4 +1,4 @@
-// blackcat.go 夜猫子任务（black_cat）+ 新手礼包/补偿 API。
+// blackcat.go 鸡蛋夜补任务（black_cat）+ 新手礼包/补偿 API。
 //
 // 判据（WorkBuddy-Daily 项目实测口径 + 本网关验证）：black_cat 要求在
 // **23:00–08:00（本地时区）窗口内**完成 3 次 glm-5.2 对话并上报 chat 事件链；
@@ -16,7 +16,7 @@ import (
 	"github.com/dawn1115/lingjidan/internal/auth"
 )
 
-// InNightWindow 当前是否处于夜猫子计数窗口（23:00–08:00 本地时区）。
+// InNightWindow 当前是否处于鸡蛋夜补计数窗口（23:00–08:00 本地时区）。
 func InNightWindow(now time.Time) bool {
 	h := now.Hour()
 	return h >= 23 || h < 8
@@ -40,7 +40,7 @@ func (c *Client) BlackcatNeed(a *auth.Auth) (int64, error) {
 	return 0, nil
 }
 
-// RunNightChats 夜猫子：发 need 次 glm-5.2 真实对话（读干流）并上报事件链。
+// RunNightChats 鸡蛋夜补：发 need 次 glm-5.2 真实对话（读干流）并上报事件链。
 // 返回成功次数。对话内容极短（1+1），消耗可忽略。
 func (c *Client) RunNightChats(a *auth.Auth, need int) (int64, error) {
 	var ok int64

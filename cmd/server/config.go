@@ -38,7 +38,7 @@ type Config struct {
 		TravelHours    []int `json:"travel_hours"`    // [9,21]
 		ActivityHours  []int `json:"activity_hours"`  // [10]
 		KeepaliveHours []int `json:"keepalive_hours"` // [22]
-		BlackcatHours  []int `json:"blackcat_hours"`  // [23] 夜猫子窗口（23:00–08:00 计数）
+		BlackcatHours  []int `json:"blackcat_hours"`  // [23] 鸡蛋夜补窗口（23:00–08:00 计数）
 		// CheckinEnabled/TravelEnabled/ActivityEnabled/KeepaliveEnabled/BlackcatEnabled 显式禁用开关（缺省 true）。
 		//
 		// 为什么用独立 bool 而不是空数组/哨兵值表意"禁用"：
@@ -48,11 +48,11 @@ type Config struct {
 		//   - 开关与取值解耦：禁用时仍保留用户显式配的小时，重新启用无需补配。
 		//   - 无需猜测哨兵（[-1] 之类），非法小时一律报错并提示改用本开关。
 		// 旧 config 里的该键因 JSON 未知字段而自然忽略，不报错。
-		CheckinEnabled   bool `json:"checkin_enabled"`   // 缺省 true；false = 关签到
-		TravelEnabled    bool `json:"travel_enabled"`    // 缺省 true；false = 完全停猫猫旅行
-		ActivityEnabled  bool `json:"activity_enabled"`  // 缺省 true；false = 停活跃上报
-		KeepaliveEnabled bool `json:"keepalive_enabled"` // 缺省 true；false = 关 token 保活
-		BlackcatEnabled  bool `json:"blackcat_enabled"`  // 缺省 true；false = 关夜猫子
+		CheckinEnabled   bool `json:"checkin_enabled"`   // 缺省 true；false = 关鸡蛋签到
+		TravelEnabled    bool `json:"travel_enabled"`    // 缺省 true；false = 完全停鸡蛋旅行
+		ActivityEnabled  bool `json:"activity_enabled"`  // 缺省 true；false = 停鸡蛋活跃
+		KeepaliveEnabled bool `json:"keepalive_enabled"` // 缺省 true；false = 关 鸡蛋保活
+		BlackcatEnabled  bool `json:"blackcat_enabled"`  // 缺省 true；false = 关鸡蛋夜补
 
 		// 余额后台周期刷新：两次签到时点之间 credits 也能保持新鲜（面板/状态观测用）。
 		// 解冻语义同签到（余额 > 0 的冷却账号自动解冻），但不做签到不刷 token。

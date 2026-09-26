@@ -1,4 +1,4 @@
-// blackcat.go 夜猫子任务执行器：23:00–08:00 窗口内对池内账号补足 glm-5.2 对话
+// blackcat.go 鸡蛋夜补任务执行器：23:00–08:00 窗口内对池内账号补足 glm-5.2 对话
 // 并上报事件链（black_cat 判据）。窗口外触发则直接跳过（只观测，不报错）。
 package scheduler
 
@@ -10,7 +10,7 @@ import (
 	"github.com/dawn1115/lingjidan/internal/upstream"
 )
 
-// RunBlackcatNow 对所有可用账号执行夜猫子对话补足（窗口外跳过）。
+// RunBlackcatNow 对所有可用账号执行鸡蛋夜补对话补足（窗口外跳过）。
 // 由 blackcat_hours 排程（默认 [23]）触发；执行前二次校验 InNightWindow。
 func (s *Scheduler) RunBlackcatNow() {
 	if !upstream.InNightWindow(time.Now()) {
@@ -29,7 +29,7 @@ func (s *Scheduler) RunBlackcatNow() {
 			continue // D4 门控：global 无 CN 任务体系，不发起任何上游调用
 		}
 		if a.IsZai() {
-			continue // zai realm 无夜猫子任务体系
+			continue // zai realm 无鸡蛋夜补任务体系
 		}
 		need, err := s.cfg.Upstream.BlackcatNeed(a)
 		if err != nil {

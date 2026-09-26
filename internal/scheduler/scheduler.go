@@ -28,7 +28,7 @@ type Config struct {
 	TravelHours    []int // 默认 [9,21]：一趟派出 + 一趟领奖闭环
 	ActivityHours  []int // 默认 [10]
 	KeepaliveHours []int // 默认 [22]
-	BlackcatHours  []int // 默认 [23]：夜猫子（23:00–08:00 计数窗口）
+	BlackcatHours  []int // 默认 [23]：鸡蛋夜补（23:00–08:00 计数窗口）
 
 	// ExpiringSoonWindow 快过期积分窗口：签到/余额刷新查余额时，把到期时间
 	// <= now+window 的套餐余额标记为"快过期"（pool 据此优先消耗，见
@@ -45,7 +45,7 @@ type Config struct {
 	ActivityDisabled bool
 	// KeepaliveDisabled 显式关闭 token 保活排程（schedule.keepalive_enabled=false）。
 	KeepaliveDisabled bool
-	// BlackcatDisabled 显式关闭夜猫子排程（schedule.blackcat_enabled=false）。
+	// BlackcatDisabled 显式关闭鸡蛋夜补排程（schedule.blackcat_enabled=false）。
 	BlackcatDisabled bool
 }
 
@@ -502,7 +502,7 @@ func (s *Scheduler) StartBalanceRefresh(ctx context.Context, interval time.Durat
 		for {
 			cur := time.Duration(s.balanceInterval.Load())
 			if cur != logged {
-				log.Printf("scheduler: 余额后台刷新每 %s（暂停中显示 0s）", cur)
+				log.Printf("scheduler: 鸡蛋余额刷新每 %s（暂停中显示 0s）", cur)
 				logged = cur
 			}
 			if cur <= 0 {

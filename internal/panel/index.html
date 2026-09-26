@@ -314,9 +314,19 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
 .dlg .body { padding: 18px 20px; overflow: auto; }
 .dlg footer { padding: 13px 20px; border-top: 1px solid var(--line-soft); display: flex; gap: 10px; }
 .dlg footer .grow { flex: 1; }
-.dlg .tabs { display: inline-flex; gap: 2px; background: var(--surface-2); border-radius: 9px; padding: 3px; margin-left: 10px; vertical-align: middle; }
-.dlg .tabs .tab { padding: 4px 14px; border-radius: 7px; border: none; background: transparent; color: var(--ink-3); font: 550 12.5px var(--sans); cursor: pointer; }
-.dlg .tabs .tab.on { background: var(--surface); color: var(--ink); box-shadow: 0 1px 3px rgba(0,0,0,.25); }
+/* 分段控件（tab）：原只服务「添加账号」弹窗，现提升为通用件供模型来源分栏复用，
+   视觉与取值一个不改（同一套 --surface-2 底 + 选中项浮起到 --surface）。 */
+.tabs { display: inline-flex; gap: 2px; background: var(--surface-2); border-radius: 9px; padding: 3px; }
+.tabs .tab { padding: 4px 14px; border-radius: 7px; border: none; background: transparent; color: var(--ink-3); font: 550 12.5px var(--sans); cursor: pointer; }
+.tabs .tab:hover { color: var(--ink-2); }
+.tabs .tab.on { background: var(--surface); color: var(--ink); box-shadow: 0 1px 3px rgba(0,0,0,.25); }
+/* 计数徽标：等宽数字与表格数值列同一口径，避免选中态换宽导致标签跳动 */
+.tabs .tab .n { margin-left: 6px; font: 500 11px var(--mono); font-variant-numeric: tabular-nums; color: var(--ink-3); }
+.tabs .tab.on .n { color: var(--accent); }
+/* 弹窗内的 tab 跟在标题后面，需补内联间距（视图内由 .md-bar 承担布局） */
+.dlg .tabs { margin-left: 10px; vertical-align: middle; }
+/* 模型视图的来源分栏行：与 .box > header 同侧边距，下方留出与表头的呼吸 */
+.md-bar { padding: 12px 17px 2px; }
 .tab-panel + .tab-panel { border-top: 1px solid var(--line-soft); margin: 0 -20px; padding: 14px 20px 0; }
 .url {
   background: var(--surface-2); border: 1px solid var(--line); border-radius: 8px;
@@ -475,10 +485,10 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
           <h3>账号池</h3>
           <span class="grow"></span>
           <span class="note" id="accNote"></span>
-          <button class="xs" id="btnCheckinAll">全部签到</button>
-          <button class="xs" id="btnTravelAll">旅行巡检</button>
-          <button class="xs" id="btnActivityAll">活跃上报</button>
-          <button class="xs" id="btnKeepaliveAll">全部保活</button>
+          <button class="xs" id="btnCheckinAll">全部鸡蛋签到</button>
+          <button class="xs" id="btnTravelAll">鸡蛋旅行巡检</button>
+          <button class="xs" id="btnActivityAll">鸡蛋活跃</button>
+          <button class="xs" id="btnKeepaliveAll">全部鸡蛋保活</button>
         </header>
         <div class="tbl-wrap">
         <table class="acc">
@@ -545,7 +555,16 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
           <span class="note" id="mdNote">实时查询上游</span>
           <button class="xs" id="btnModels">重新获取</button>
         </header>
-        <div class="tbl-wrap">
+        <!-- 按来源分栏：三个来源的模型能力字段口径不同（z.ai 无思考档位、国际版另有目录端点），
+             混在一张表里要靠 id 前缀自己辨认；分栏后每屏只呈现一个来源。 -->
+        <div class="md-bar">
+          <div class="tabs" id="mdTabs" role="tablist" aria-label="模型来源">
+            <button class="tab on" role="tab" id="mdTab-cn" data-realm="cn" aria-selected="true" aria-controls="mdPanel" tabindex="0">腾讯中文版</button>
+            <button class="tab" role="tab" id="mdTab-global" data-realm="global" aria-selected="false" aria-controls="mdPanel" tabindex="-1">腾讯国际版</button>
+            <button class="tab" role="tab" id="mdTab-zai" data-realm="zai" aria-selected="false" aria-controls="mdPanel" tabindex="-1">z.ai 中文版</button>
+          </div>
+        </div>
+        <div class="tbl-wrap" id="mdPanel" role="tabpanel" aria-labelledby="mdTab-cn">
         <table class="acc md">
           <thead><tr><th class="mark" aria-hidden="true"></th><th>模型</th><th>积分倍率</th><th>默认档</th><th>支持的思考档位</th><th>上下文长度</th><th>最大输出</th></tr></thead>
           <tbody id="mdBody"></tbody>
@@ -665,38 +684,38 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
           <div class="pad">
             <div class="grid2">
               <div>
-                <div class="switch"><span class="lb">自动签到</span>
+                <div class="switch"><span class="lb">鸡蛋签到</span>
                   <input type="checkbox" name="checkin_enabled"></div>
-                <label class="fld"><span class="lb">签到时点（小时，逗号分隔）</span>
+                <label class="fld"><span class="lb">鸡蛋签到时点（小时，逗号分隔）</span>
                   <input name="checkin_hours" placeholder="9, 21"></label>
               </div>
               <div>
-                <div class="switch"><span class="lb">Token 保活</span>
+                <div class="switch"><span class="lb">鸡蛋保活</span>
                   <input type="checkbox" name="keepalive_enabled"></div>
-                <label class="fld"><span class="lb">保活时点（小时，逗号分隔）</span>
+                <label class="fld"><span class="lb">鸡蛋保活时点（小时，逗号分隔）</span>
                   <input name="keepalive_hours" placeholder="22"></label>
               </div>
             </div>
             <div class="hr"></div>
             <div class="grid2">
               <div>
-                <div class="switch"><span class="lb">猫猫旅行</span>
+                <div class="switch"><span class="lb">鸡蛋旅行</span>
                   <input type="checkbox" name="travel_enabled"></div>
-                <label class="fld"><span class="lb">旅行时点（小时，逗号分隔）</span>
+                <label class="fld"><span class="lb">鸡蛋旅行时点（小时，逗号分隔）</span>
                   <input name="travel_hours" placeholder="9, 21">
                   <span class="hint">一趟派出 + 一趟领奖闭环</span></label>
               </div>
               <div>
-                <div class="switch"><span class="lb">活跃上报</span>
+                <div class="switch"><span class="lb">鸡蛋活跃</span>
                   <input type="checkbox" name="activity_enabled"></div>
-                <label class="fld"><span class="lb">上报时点（小时，逗号分隔）</span>
+                <label class="fld"><span class="lb">鸡蛋活跃时点（小时，逗号分隔）</span>
                   <input name="activity_hours" placeholder="10">
                   <span class="hint">点亮连登 + 解锁领养前置</span></label>
               </div>
             </div>
             <div class="hr"></div>
             <div class="grid2">
-              <div class="switch"><span class="lb">后台刷新余额</span>
+              <div class="switch"><span class="lb">鸡蛋余额刷新</span>
                 <input type="checkbox" name="balance_refresh_enabled"></div>
               <label class="fld"><span class="lb">刷新间隔（分钟）</span>
                 <input name="balance_refresh_minutes" type="number" min="1" placeholder="5"></label>

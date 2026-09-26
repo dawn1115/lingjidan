@@ -33,7 +33,7 @@ import (
 type Config struct {
 	Pool      *pool.Pool
 	Upstream  *upstream.Client
-	Scheduler *scheduler.Scheduler // 手动触发签到/保活；nil 时对应接口返回 501
+	Scheduler *scheduler.Scheduler // 手动触发鸡蛋签到/鸡蛋保活；nil 时对应接口返回 501
 	AuthDir   string               // OAuth 登录完成后凭证落盘目录
 	APIKey    string               // 空 = 不鉴权（与主服务同语义）；与 Live 同时给出时 Live 优先
 	RedisMode string               // "upstash" / "noop"，仅观测透出
@@ -504,7 +504,7 @@ func (p *Panel) checkinAll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	go p.cfg.Scheduler.RunCheckinNow()
-	log.Printf("panel: 手动全量签到已触发（含猫猫旅行）")
+	log.Printf("panel: 手动全量鸡蛋签到已触发（含鸡蛋旅行）")
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "started": true})
 }
 
@@ -515,7 +515,7 @@ func (p *Panel) travelAll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	go p.cfg.Scheduler.RunTravelNow()
-	log.Printf("panel: 手动全量旅行巡检已触发")
+	log.Printf("panel: 手动全量鸡蛋旅行巡检已触发")
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "started": true})
 }
 
@@ -526,7 +526,7 @@ func (p *Panel) activityAll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	go p.cfg.Scheduler.RunActivityNow()
-	log.Printf("panel: 手动全量活跃上报已触发")
+	log.Printf("panel: 手动全量鸡蛋活跃已触发")
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "started": true})
 }
 
@@ -537,7 +537,7 @@ func (p *Panel) keepaliveAll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	go p.cfg.Scheduler.RunKeepaliveNow()
-	log.Printf("panel: 手动全量保活已触发")
+	log.Printf("panel: 手动全量鸡蛋保活已触发")
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "started": true})
 }
 
@@ -550,7 +550,7 @@ func (p *Panel) balanceAll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p.cfg.Scheduler.RunBalanceRefreshNow()
-	log.Printf("panel: 手动全量余额刷新完成")
+	log.Printf("panel: 手动全量鸡蛋余额刷新完成")
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "accounts": p.cfg.Pool.List()})
 }
 
