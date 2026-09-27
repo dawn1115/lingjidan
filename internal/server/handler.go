@@ -668,6 +668,11 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	chatMeta.TraceID = r.Header.Get("X-Trace-ID")
 
+	// slotWaits 本次请求为等并发名额已重试的次数；saturated 标记「等过槽仍未拿到
+	// 名额」——用于把「账号忙」与「账号不可用」分开上报（见循环内 nil 分支）。
+	slotWaits := 0
+	saturated := false
+
 	for i := 0; i < h.cfg.MaxRotate; i++ {
 		// 选号：粘性号优先（PickByUIDForModel 已校验该模型可用性 + 在途未满），否则普通轮换。
 		var acct *auth.Auth
@@ -686,6 +691,23 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			acct = h.cfg.Pool.PickExcludingForRealm(tried, bareModel, realm)
 		}
 		if acct == nil {
+			// 无候选分两种语义，此前一律 break → 都被报成「所有账号暂不可用」：
+			//   - **账号忙**：账号健康（healthyForModel 成立）但 in-flight 名额被并发
+			//     请求占满。单账号域（zai：1 号 × max_in_flight=3）并发超上限时必然
+			//     走到这里。等槽即可恢复，不该判为失败。
+			//   - **账号不可用**：冷却/禁用/该模型被 6004·11102 避让。换号与等待都无意义。
+			// 等槽有界（slotWaitTries），且不消耗 MaxRotate 轮转预算（i--）。
+			if slotWaits < slotWaitTries && h.cfg.Pool.InFlightSaturatedForModel(tried, bareModel, realm) {
+				if !sleepCtx(r.Context(), slotWaitStep) {
+					saturated = true
+					break // 客户端已断连：等槽无意义
+				}
+				slotWaits++
+				i--
+				continue
+			}
+			// 等过槽仍未拿到名额 → 按容量饱和上报；否则是真正的无可用账号。
+			saturated = slotWaits > 0
 			st.status = http.StatusServiceUnavailable
 			break
 		}
@@ -937,6 +959,17 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	// 容量饱和（账号健康、仅并发名额占满，等过槽仍未拿到）：用独立 code 与文案
+	// 上报，**不复用 no_healthy_account** —— 那是"账号不可用"的语义（客户端据此
+	// 显示"所有账号暂不可用"，会误导用户以为账号全挂、也让运维去查不存在的账号故障）。
+	// 这里账号是好的、只是忙：客户端退避重试即可命中，运维无需干预。
+	if saturated {
+		writeOpenAIErrorHint(w, http.StatusServiceUnavailable, "pool_saturated",
+			"all accounts are busy (concurrency limit reached), please retry in a moment",
+			upstream.PoolSaturatedHint())
+		st.status = http.StatusServiceUnavailable
+		return
+	}
 	// 末端错误透传（error-passthrough）：上游返回的错误原样透传，不再规范化成固定文案。
 	// 上游返回（*upstream.Error）→ error.message 装**上游 body 原文**（code/msg/
 	// requestId 原样保留）。HTTP 状态码按 OpenAI 兼容口径映射类别：ErrSoftRate → 429
@@ -1181,6 +1214,15 @@ func writeOpenAIError(w http.ResponseWriter, status int, code, msg string) {
 // （账号本身健康），但比 404 重（带粘性会连环）；60s 级的快速避让已足够让频控窗口
 // 滑过。抖动复用 backoff.go jitterDur（单一来源）。
 const wafCooldownBase = 60 * time.Second
+
+// slotWaitStep / slotWaitTries 并发容量饱和（账号健康但 in-flight 名额占满）时的
+// 等槽参数：每次等 slotWaitStep 后重试一次选号，最多 slotWaitTries 次（默认共 3s）。
+// 小步长让刚释放的名额尽快被等到（多数情况几百 ms 内命中）；次数上限避免把请求拖成
+// 长尾——客户端自身也会重试，网关不该无限等待。用「次数」而非「累计时长」定界，
+// 步长被测试置 0 时循环仍有界（不会因累计恒 0 而空转）。
+const slotWaitTries = 15
+
+var slotWaitStep = 200 * time.Millisecond
 
 // writeOpenAIErrorHint 同 writeOpenAIError，另在 error 对象上附加
 // error.gateway_hint（hint 为空串时不带字段——未覆盖形态不编造）。

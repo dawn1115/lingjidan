@@ -1,15 +1,18 @@
 // zai_captcha.go Z.ai（Start Plan 免费额度）通道所需的阿里云无痕验证参数求解。
 //
 // 背景：zcode.z.ai 的 coding-plan 代理端点对 JWT（免费/套餐）通道的**每个**模型请求
-// 都要求 X-Aliyun-Captcha-Verify-Param。该参数由阿里云无痕 SDK 现场签发，有效期短
-// （实测 45s 内可复用、超时后失效）。缺失 → 上游 400 code 3007「captcha verify failed」。
+// 都要求 X-Aliyun-Captcha-Verify-Param。该参数由阿里云无痕 SDK 现场签发，
+// **一次性**（同一参数第二次使用即被拒）；缺失/失效 → 上游 400 code 3007
+// 「captcha verify failed」。
 //
 // 本项目不内置浏览器，改为子进程调用 Node 求解器（captcha_node/solver.js，
 // 用 happy-dom 模拟浏览器环境直接跑阿里云官方 SDK）。设计对齐社区验证实现
 // （dengyie/zcode2api 的 app/captcha.py）：
-//   - 结果缓存（默认 45s）：TTL 内复用同一参数，避免每请求都起进程
-//   - 并发去重：同一时刻只跑一个求解进程，其余请求等锁后命中缓存
-//   - 失败重试：单次求解偶发失败时自动重试
+//   - 预解池：请求直接取一枚现成参数（亚毫秒），取走后后台异步补货；
+//     池空才同步现解。**参数取走即消耗、绝不复用**——复用是并发下连环 3007 的根因。
+//   - 求解单飞：同一时刻只起一个求解子进程，并发触发共享结果。
+//   - 失败重试：单次求解偶发失败时自动重试（zaiCaptchaAttempts）。
+//   - 挑战失效：上游回 3007 时清空整池（那批参数可能已被风控盯上）。
 //
 // 使用前提：在 captcha_node 目录执行过一次 npm install（安装 happy-dom）。
 package upstream
@@ -35,24 +38,52 @@ const (
 	zaiCaptchaRegion = "cn"
 )
 
-// zaiCaptchaTTL 求得的验证码参数缓存时长。社区实测 45s 内可复用；
-// 超出后上游回 3007，届时重新求解即可。
-const zaiCaptchaTTL = 45 * time.Second
+// zaiCaptchaTokenTTL 单枚验证码参数的最大可用时长（超龄即丢弃重解）。
+// 参数实际 TTL 约 2 分钟，此处取 95s 留出余量（对齐社区验证实现 zcode2api 的
+// CAPTCHA_TOKEN_TTL 默认值）；注意它只是"库存保鲜期"，**不代表可以复用**——
+// 参数是一次性的（见 zaiCaptchaState）。
+const zaiCaptchaTokenTTL = 95 * time.Second
+
+// zaiCaptchaPoolMin / zaiCaptchaPoolMax 预解池的目标库存与上限
+// （对齐社区验证实现 zcode2api 的 CAPTCHA_POOL_MIN/MAX 默认值 3/10）。
+// 热路径从池里取一枚（亚毫秒），取走后异步补货——避免每个请求都等一次求解
+// （求解要起 Node 子进程，单次数秒）。上限防库存无限堆积。
+const (
+	zaiCaptchaPoolMin = 3
+	zaiCaptchaPoolMax = 10
+)
 
 // zaiCaptchaTimeout 单次求解子进程超时（求解器内部另有 ~25s 自超时）。
 const zaiCaptchaTimeout = 60 * time.Second
 
-// zaiCaptchaAttempts 求解失败重试次数。实测单次成功率约 6 成（SDK 侧偶发 stall），
+// zaiCaptchaAttempts 单次求解的进程内重试次数。实测单次成功率约 6 成（SDK 侧偶发 stall），
 // 5 次重试把整体失败率压到 1% 量级。
 const zaiCaptchaAttempts = 5
 
-// zaiCaptchaSolver 求解器的进程级单例（缓存 + 并发去重状态）。
+// zaiCaptchaSolver 求解器的进程级单例（预解池 + 并发去重状态）。
 var zaiCaptchaSolver = &zaiCaptchaState{}
 
-type zaiCaptchaState struct {
-	mu        sync.Mutex
+type zaiCaptchaToken struct {
 	param     string
 	fetchedAt time.Time
+}
+
+// zaiCaptchaState 验证码参数预解池。
+//
+// **关键事实：verifyParam 是一次性的**——上游对同一参数的第二次使用回 code 3007
+// （社区验证实现的 get_verify_param 取出后从不放回，即此语义）。此前的实现把单枚
+// 参数缓存 45s 供所有请求复用：串行时靠"撞 3007 → 失效重解 → 重试"勉强自愈，
+// **并发时必然集体撞车**——N 个请求同时复用同一枚 → 全部 3007 → 一起失效重解 →
+// 又拿到同一枚新参数 → 再次全部 3007，同请求重试次数耗尽 → 503。这正是
+// "单账号域 + 客户端并发" 下频繁 no_healthy_account 的根因之一。
+//
+// 因此改为预解池：每次请求**取走**一枚（不再归还），池子由后台异步补货；
+// 上游报挑战时清空整池（该批指纹可能已被盯上，继续复用只会连环 3007）。
+type zaiCaptchaState struct {
+	mu        sync.Mutex
+	pool      []zaiCaptchaToken // FIFO；取走即消耗
+	refilling bool              // 补货循环单飞
+	solveMu   sync.Mutex        // 求解单飞（避免并发起多个 Node 子进程）
 }
 
 // zaiCaptchaEnabled 报告是否启用验证码求解。
@@ -105,38 +136,116 @@ func zaiNodePath() string {
 	return "node"
 }
 
-// ZaiCaptchaParam 取一个可用的验证码参数：TTL 内直接复用缓存，否则求解。
-// 返回空串表示求解不可用（调用方据此决定是否继续出站——无参数时上游必回 3007）。
+// ZaiCaptchaParam 取一枚**一次性**验证码参数：优先池内现成（亚毫秒，取走即消耗），
+// 池空则同步现解一枚。返回空串表示求解不可用（调用方据此决定是否继续出站——
+// 无参数时上游必回 3007）。
+//
+// 取出后异步触发补货，让后续请求继续命中热路径。**绝不复用**同一枚参数：
+// 复用是并发下连环 3007 的根因（见 zaiCaptchaState）。
 func ZaiCaptchaParam(ctx context.Context) string {
 	if !zaiCaptchaEnabled() {
 		return ""
 	}
 	s := zaiCaptchaSolver
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.param != "" && time.Since(s.fetchedAt) < zaiCaptchaTTL {
-		return s.param
+	if p := s.take(); p != "" {
+		go s.refill(context.Background())
+		return p
 	}
-	param := zaiSolveCaptcha(ctx)
-	if param == "" {
-		return ""
+	// 池空：同步求解兜底（首启 / 补货跟不上突发并发）。补货用独立 ctx：
+	// 请求 ctx 结束后仍应把库存补上。
+	p := s.solveOnce(ctx)
+	if p != "" {
+		go s.refill(context.Background())
 	}
-	s.param = param
-	s.fetchedAt = time.Now()
-	return param
+	return p
 }
 
-// InvalidateZaiCaptcha 丢弃缓存（上游返回 3007 时调用，强制下次重新求解）。
+// take 从池中取走一枚（一次性消耗）；池空或全部超龄返回空串。
+func (s *zaiCaptchaState) take() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.evictLocked()
+	if len(s.pool) == 0 {
+		return ""
+	}
+	p := s.pool[0].param
+	s.pool = s.pool[1:]
+	return p
+}
+
+// evictLocked 丢弃超龄库存。调用方须持 s.mu。
+func (s *zaiCaptchaState) evictLocked() {
+	if len(s.pool) == 0 {
+		return
+	}
+	now := time.Now()
+	keep := s.pool[:0]
+	for _, t := range s.pool {
+		if now.Sub(t.fetchedAt) < zaiCaptchaTokenTTL {
+			keep = append(keep, t)
+		}
+	}
+	s.pool = keep
+}
+
+// solveOnce 单飞求解一枚并**直接返回**（不入池——调用方要么马上用掉，要么由
+// refill 入库）。等锁期间若已有补货入库，优先取现成的，省掉一次 Node 子进程。
+func (s *zaiCaptchaState) solveOnce(ctx context.Context) string {
+	s.solveMu.Lock()
+	defer s.solveMu.Unlock()
+	if p := s.take(); p != "" {
+		return p
+	}
+	return zaiSolveCaptcha(ctx)
+}
+
+// refill 后台补货：把库存补到 zaiCaptchaPoolMin（不超过 zaiCaptchaPoolMax）。
+// 循环单飞（refilling）+ 求解单飞（solveMu）：并发触发也只会有一个补货循环、
+// 一个求解子进程。
+func (s *zaiCaptchaState) refill(ctx context.Context) {
+	s.mu.Lock()
+	if s.refilling || !zaiCaptchaEnabled() {
+		s.mu.Unlock()
+		return
+	}
+	s.refilling = true
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		s.refilling = false
+		s.mu.Unlock()
+	}()
+	for {
+		s.mu.Lock()
+		s.evictLocked()
+		short := len(s.pool) < zaiCaptchaPoolMin
+		s.mu.Unlock()
+		if !short {
+			return
+		}
+		p := s.solveOnce(ctx)
+		if p == "" {
+			return // 求解不可用（Node 缺失/无外网/连续失败）：不空转，等下次触发
+		}
+		s.mu.Lock()
+		if len(s.pool) < zaiCaptchaPoolMax {
+			s.pool = append(s.pool, zaiCaptchaToken{param: p, fetchedAt: time.Now()})
+		}
+		s.mu.Unlock()
+	}
+}
+
+// InvalidateZaiCaptcha 清空整池（上游返回 3007 时调用）：该批参数可能已被风控盯上，
+// 继续复用只会连环 3007，丢掉重解才是正解。
 func InvalidateZaiCaptcha() {
 	s := zaiCaptchaSolver
 	s.mu.Lock()
-	s.param = ""
-	s.fetchedAt = time.Time{}
+	s.pool = nil
 	s.mu.Unlock()
 }
 
 // zaiSolveCaptcha 起子进程求解，成功返回参数、失败返回空串。
-// 调用方必须持有 zaiCaptchaSolver.mu（保证并发去重）。
+// 并发去重由调用方负责（solveOnce 持 solveMu 调用），本函数自身不加锁。
 func zaiSolveCaptcha(ctx context.Context) string {
 	solverPath := zaiCaptchaSolverPath()
 	if solverPath == "" {

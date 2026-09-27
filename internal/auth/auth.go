@@ -197,8 +197,9 @@ func BackfillRealmFor(a *Auth, realm string) (bool, error) {
 func (a *Auth) IsGlobal() bool { return a.Realm() == "global" }
 
 // IsZai 判定是否 Z.ai realm。Z.ai 账号（x-api-key）无 CodeBuddy 的签到/活跃/
-// 任务/旅行等 CN 活动体系，也无余额积分概念，scheduler 各排程按此门控跳过，
-// 不发起任何 CodeBuddy 上游调用（对 Z.ai 端点无意义且有日志噪音）。
+// 任务/旅行等 CN 活动体系，scheduler 各排程按此门控跳过，不发起任何 CodeBuddy
+// 上游调用（对 Z.ai 端点无意义且有日志噪音）。额度不走 CodeBuddy 的积分口径，
+// 而是智谱自己的 billing 后端（见 upstream.zaiUserResource）。
 func (a *Auth) IsZai() bool { return a.Realm() == "zai" }
 
 // isGlobalDomain 判定 domain 是否指向 www.workbuddy.ai 家族。

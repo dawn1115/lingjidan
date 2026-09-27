@@ -38,6 +38,13 @@ const ZaiApiKeyChatBase = "https://api.z.ai/api/anthropic"
 // ZaiChatBase 默认出站 base：走免费额度 Plan 通道。
 const ZaiChatBase = ZaiPlanChatBase
 
+// ZaiPlanBillingBase Z.ai Plan 通道的套餐/额度查询 base（与 chat 同域、不同路径）。
+// 端点（均 GET，需 Bearer JWT + X-Device-Mid；缺 Device-Mid 上游回 code 3001）：
+//   - {base}/billing/current  套餐与授权（plans[].entitlements）
+//   - {base}/billing/balance  各模型额度桶（total_units/used_units/remaining_units/expires_at）
+//   - {base}/usage            用量
+const ZaiPlanBillingBase = "https://zcode.z.ai/api/v1/zcode-plan"
+
 // ZaiAnthropicVersion Anthropic 版本头（Z.ai 网关接受该值；缺省 conservative）。
 const ZaiAnthropicVersion = "2023-06-01"
 
@@ -69,7 +76,6 @@ const (
 	// zaiCaptchaRetries 验证码挑战的同请求内重试次数（0 = 不重试）。
 	zaiCaptchaRetries = 1
 )
-
 
 // ClassifyZai 按 Anthropic 错误信封分类（映射到与 CodeBuddy 相同的 ErrKind 枚举，
 // pool 状态机/applyErrorPolicy 零改动复用）。
@@ -440,6 +446,17 @@ func zaiCaptchaChallenge(status int, body []byte) bool {
 // WAF 关注度。追踪头**只发三个**——start-plan 通道若多发 x-query-id /
 // x-session-id，上游会直接判 3012「unusual activity」（社区实证 + 本项目复现）。
 func (c *Client) applyZaiIdentityHeaders(req *http.Request, a *auth.Auth) {
+	c.applyZaiIdentityBase(req, a)
+	req.Header.Set("X-ZCode-Agent", zaiAgentHeader)
+	// 追踪头：每请求全新 UUID；start-plan 严禁 x-query-id / x-session-id。
+	req.Header.Set("x-request-id", zaiUUID4())
+	req.Header.Set("x-zcode-session-type", "main")
+	req.Header.Set("x-zcode-trace-id", zaiUUID4())
+}
+
+// applyZaiIdentityBase 写 messages 与 billing 共用的客户端身份头（chat 的额外追踪头
+// 与 billing 的鉴权头各自在包装函数里追加，见上/下两处）。
+func (c *Client) applyZaiIdentityBase(req *http.Request, a *auth.Auth) {
 	ua := c.UserAgent
 	if ua == "" {
 		ua = "ZCode/" + zaiAppVersion
@@ -448,7 +465,6 @@ func (c *Client) applyZaiIdentityHeaders(req *http.Request, a *auth.Auth) {
 	req.Header.Set("HTTP-Referer", zaiHTTPReferer)
 	req.Header.Set("X-ZCode-App-Version", zaiAppVersion)
 	req.Header.Set("X-Title", zaiClientTitle)
-	req.Header.Set("X-ZCode-Agent", zaiAgentHeader)
 	req.Header.Set("X-Platform", zaiClientPlatform)
 	req.Header.Set("X-Release-Channel", zaiReleaseChannel)
 	req.Header.Set("X-Client-Language", zaiClientLanguage)
@@ -456,10 +472,78 @@ func (c *Client) applyZaiIdentityHeaders(req *http.Request, a *auth.Auth) {
 	req.Header.Set("X-Os-Category", zaiOsCategory)
 	req.Header.Set("X-Os-Version", zaiOsVersion)
 	req.Header.Set("X-Device-Mid", zaiDeviceMid(a.UID))
-	// 追踪头：每请求全新 UUID；start-plan 严禁 x-query-id / x-session-id。
+}
+
+// applyZaiBillingHeaders billing（套餐/额度）出站头：身份头 + Bearer + x-request-id。
+//
+// 刻意**不发** x-zcode-session-type / x-zcode-trace-id —— 官方客户端 billing 请求不带
+// 这两个 chat 专属追踪头（社区实证形态 zai_billing_headers），多带只会扩大指纹面。
+func (c *Client) applyZaiBillingHeaders(req *http.Request, a *auth.Auth) {
+	c.applyZaiIdentityBase(req, a)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Authorization", "Bearer "+a.AccessTokenValue())
 	req.Header.Set("x-request-id", zaiUUID4())
-	req.Header.Set("x-zcode-session-type", "main")
-	req.Header.Set("x-zcode-trace-id", zaiUUID4())
+}
+
+// zaiBillingBase 生效的 Z.ai billing base（测试可经 Client.ZaiBillingBase 覆盖）。
+func (c *Client) zaiBillingBase() string {
+	if c.ZaiBillingBase != "" {
+		return c.ZaiBillingBase
+	}
+	return ZaiPlanBillingBase
+}
+
+// zaiUserResource 查询 Z.ai 账号额度（GET {base}/billing/balance）：
+// 把 data.balances[] 各模型额度桶按 total_units / remaining_units 求和。
+//
+// 为什么必须独立于 CodeBuddy 的 billing：两者是完全不同的计费后端（智谱是
+// zcode.z.ai 的按模型 token 桶，CodeBuddy 是 workbuddy 的积分套餐表）。此前
+// billingBase 只区分 cn/global，zai 账号被当成 CN、拿 JWT 去打 CodeBuddy 计费端点，
+// 被其 apisix 网关判 401 —— 面板「刷新余额」对智谱账号必失败（issue：智谱余额未适配）。
+//
+// expiring 语义与 CodeBuddy 侧一致（快过期子集，供选号优先消耗）：soon > 0 时把
+// expires_at ≤ now+soon 的桶剩余额度计入；soon ≤ 0 恒 0。remain 负值钳 0。
+func (c *Client) zaiUserResource(a *auth.Auth, soon time.Duration) (remain, total, expiring int64, err error) {
+	req, err := http.NewRequest(http.MethodGet, c.zaiBillingBase()+"/billing/balance", nil)
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	c.applyZaiBillingHeaders(req, a)
+	data, err := c.doJSON(req)
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	var resp struct {
+		Balances []struct {
+			TotalUnits     int64 `json:"total_units"`
+			RemainingUnits int64 `json:"remaining_units"`
+			// ExpiresAt 额度桶到期时刻（epoch 秒；0 = 无到期）。
+			ExpiresAt int64 `json:"expires_at"`
+		} `json:"balances"`
+	}
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return 0, 0, 0, fmt.Errorf("zai balance parse: %w", err)
+	}
+	if len(resp.Balances) == 0 {
+		// 空桶 = 无可判定的额度（不编造 0 额度冒充"查询成功"）。
+		return 0, 0, 0, fmt.Errorf("zai balance: upstream returned no balance buckets")
+	}
+	now := time.Now()
+	for _, b := range resp.Balances {
+		total += b.TotalUnits
+		if b.RemainingUnits <= 0 {
+			continue
+		}
+		remain += b.RemainingUnits
+		if soon > 0 && b.ExpiresAt > 0 && !time.Unix(b.ExpiresAt, 0).After(now.Add(soon)) {
+			expiring += b.RemainingUnits
+		}
+	}
+	if remain < 0 {
+		remain = 0
+	}
+	return remain, total, expiring, nil
 }
 
 // zaiModelCatalog Z.ai Plan 通道（免费额度/套餐）可用的模型静态目录。

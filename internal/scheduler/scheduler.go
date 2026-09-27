@@ -468,7 +468,11 @@ func (s *Scheduler) RunBalanceRefreshNow() {
 			continue
 		}
 		if a.IsZai() {
-			continue // zai 无积分/余额概念，UserResourceDetailed 端点对 zai 无意义
+			// zai 额度已适配（upstream.zaiUserResource → zcode.z.ai /billing/balance），
+			// 但**周期自动刷新**仍跳过：本循环的成功分支会走 ReenableIfCredits 解冻
+			// （清冷却），而智谱风控/限流冷却中的账号不该因为"还有额度"被自动复活
+			// （额度与账号可用性无关）。面板「刷新余额」按需查询不受影响。
+			continue
 		}
 		wg.Add(1)
 		go func(a *auth.Auth, uid string) {

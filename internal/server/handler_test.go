@@ -26,6 +26,8 @@ import (
 // 断言表格行输出的测试（logging_test.go 中的 ChatLogs/LogChatRow 系列）用 withChatLog 临时开启。
 func TestMain(m *testing.M) {
 	chatLogEnabled = false
+	// 并发饱和等槽不真等待：次数上限（slotWaitTries）仍生效，语义不变，仅省掉 3s 空等。
+	slotWaitStep = 0
 	os.Exit(m.Run())
 }
 
@@ -1589,5 +1591,66 @@ func TestCustomModeFingerprintSanitizePreserved(t *testing.T) {
 	}
 	if systemCount != 1 {
 		t.Errorf("want exactly 1 system message, got %d (all=%v)", systemCount, msgs)
+	}
+}
+
+// TestChatSaturatedReportsPoolSaturated 并发名额占满（账号健康、仅 in-flight 拉满）时
+// 必须报 pool_saturated，而非 no_healthy_account —— 前者是「账号忙」（等槽/重试即可恢复），
+// 后者是「账号不可用」。回归：单账号域（zai：1 号 × 并发上限）曾把瞬时饱和误报成
+// "all accounts are temporarily unavailable"，客户端据此以为账号全挂。
+func TestChatSaturatedReportsPoolSaturated(t *testing.T) {
+	za := &auth.Auth{UID: "zai-1", AccessToken: "at-zai", ExpiresAt: 9999999999}
+	if _, err := auth.BackfillRealmFor(za, "zai"); err != nil {
+		t.Fatal(err)
+	}
+	p := testPoolWith(za)
+	p.SetMaxInFlight(1)
+	// 预占唯一名额：模拟"另一个并发请求正在用这个号"。
+	if !p.Acquire("zai-1") {
+		t.Fatal("预占并发名额失败")
+	}
+	defer p.Release("zai-1")
+
+	up := newFakeUpstream(t, func(string) (int, string, bool) { return 200, sseOK, true })
+	h := NewHandler(Config{Pool: p, Upstream: up})
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions",
+		strings.NewReader(`{"model":"zai:GLM-5.3","stream":true,"messages":[{"role":"user","content":"hi"}]}`)))
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("code=%d body=%s want 503", rec.Code, rec.Body)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "pool_saturated") {
+		t.Errorf("账号健康但名额占满 → 应报 pool_saturated，实得 body=%s", body)
+	}
+	if strings.Contains(body, "no_healthy_account") {
+		t.Errorf("不得复用 no_healthy_account（账号并非不可用）：%s", body)
+	}
+}
+
+// TestChatDisabledStillNoHealthyAccount 对照：账号确实不可用（禁用）时仍报
+// no_healthy_account —— 饱和分支不得把真故障改写成「账号忙」。
+func TestChatDisabledStillNoHealthyAccount(t *testing.T) {
+	za := &auth.Auth{UID: "zai-1", AccessToken: "at-zai", ExpiresAt: 9999999999}
+	if _, err := auth.BackfillRealmFor(za, "zai"); err != nil {
+		t.Fatal(err)
+	}
+	p := testPoolWith(za)
+	p.SetMaxInFlight(1)
+	p.Disable("zai-1", "test: unavailable")
+	h := NewHandler(Config{Pool: p, Upstream: newFakeUpstream(t, func(string) (int, string, bool) {
+		return 200, sseOK, true
+	})})
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions",
+		strings.NewReader(`{"model":"zai:GLM-5.3","stream":true,"messages":[{"role":"user","content":"hi"}]}`)))
+	body := rec.Body.String()
+	if !strings.Contains(body, "no_healthy_account") {
+		t.Errorf("账号禁用（真不可用）应报 no_healthy_account，实得 body=%s", body)
+	}
+	if strings.Contains(body, "pool_saturated") {
+		t.Errorf("不得把真故障报成 pool_saturated：%s", body)
 	}
 }

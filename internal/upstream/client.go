@@ -666,6 +666,11 @@ type Client struct {
 	ChatBaseGlobal    string
 	BillingBaseGlobal string
 
+	// ZaiBillingBase Z.ai（realm=zai）套餐/余额查询 base。与 chat 的 Plan 通道同域
+	// 不同路径（chat 走 /anthropic/v1/messages，额度走 /billing/balance）。
+	// 空 = 缺省默认 https://zcode.z.ai/api/v1/zcode-plan（见 zai.go）。
+	ZaiBillingBase string
+
 	// GlobalEnabled 是否启用 global realm 路由（config global.enabled，缺省 true）。
 	// false 时即便用户 auth 写了 realm=global 也**不**路由到 global base——
 	// chatBase/billingBase 返回 CN base，路径也走 CN（双保险，与 auth.Realm() 的开关闸呼应）。
@@ -1809,6 +1814,8 @@ func (c *Client) UserResource(a *auth.Auth) (remain, total int64, err error) {
 const packageEndLayout = "2006-01-02 15:04:05"
 
 // UserResourceDetailed 在 UserResource 基础上额外返回「快过期」积分子集：
+// zai 域直接分流到 zaiUserResource（智谱 billing/balance，桶按 expires_at 判到期）；
+// cn/global 走下述 CodeBuddy 口径：
 // soon > 0 且套餐 CycleEndTime 解析成功且到期时刻 ≤ now+soon 的余额计入 expiring
 // （pool 据此优先消耗，避免官方活动赠送的奖励积分到期作废）；soon ≤ 0 时 expiring
 // 恒 0（禁用分桶，行为与引入前一致）。expiring 是 remain 的一部分。
@@ -1821,6 +1828,12 @@ const packageEndLayout = "2006-01-02 15:04:05"
 // 钳 [0,size] 与 used 修正；消除双份逻辑漂移——旧中间 switch 只钳负值，上游脏数据
 // CycleRemain>Size 时会高估）。
 func (c *Client) UserResourceDetailed(a *auth.Auth, soon time.Duration) (remain, total, expiring int64, err error) {
+	// zai 域分流：智谱的额度在后端 zcode.z.ai 的 /billing/balance（按模型 token 桶），
+	// 与 CodeBuddy 的 /billing/meter/get-user-resource 完全不同源——不复用 billingBase
+	// （它只区分 cn/global，会把 zai 打到 CodeBuddy 计费端点并吃 401）。
+	if a != nil && a.IsZai() {
+		return c.zaiUserResource(a, soon)
+	}
 	now := time.Now()
 	body := map[string]any{
 		"PageNumber":               1,

@@ -32,7 +32,12 @@ import (
 // appVersion 网关版本（领鸡蛋助手：面板 + 任务体系 + Z.ai 通道），透出到 /panel/api/overview。
 // 1.11.9：Z.ai 工具链路修复（tool_use → OpenAI tool_calls 规范嵌套 + index 归零）
 // + 裸名 Z.ai 目录精确别名（GLM-5.3 等官方拼写裸名路由到 zai 域）。
-const appVersion = "1.11.9"
+// 1.11.10：智谱额度查询适配（zai 域走 zcode.z.ai /billing/balance，不再误打 CodeBuddy 计费端点吃 401）。
+// 1.11.11：并发容量饱和不再误报 no_healthy_account（改为 pool_saturated + 有界等槽），
+// 单账号域（zai）并发超上限时的 503 由"账号全挂"语义修正为"账号忙"。
+// 1.11.12：验证码参数改为预解池（一次性消耗、取走即补货）。旧实现把单枚参数缓存 45s
+// 全员复用，并发下必然集体 3007 → 频繁 503。
+const appVersion = "1.11.12"
 
 // usagePathFor 由 state 文件路径推出用量文件路径：同目录、文件名 usage.json。
 // 这样 config 里改 state_file 时用量数据跟着走，不需要额外配置项。

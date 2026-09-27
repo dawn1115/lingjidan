@@ -90,6 +90,15 @@ const noHealthyHint = "no healthy account available in pool; check /status or re
 // NoHealthyAccountHint 本地调度错误的 gateway_hint（与 no_healthy_account code 配套）。
 func NoHealthyAccountHint() string { return noHealthyHint }
 
+// poolSaturatedHint 并发容量饱和（账号健康、仅 in-flight 名额占满）的固定 hint。
+// 与 noHealthyHint 必须分开：那种情况账号是真不可用（冷却/禁用/被避让），这里是
+// **账号可用但正忙**，等名额释放即可——误导成"账号全挂"会让客户端放弃重试、
+// 也会让运维去查不存在的账号故障。
+const poolSaturatedHint = "all accounts are busy at their concurrency limit; retry in a moment"
+
+// PoolSaturatedHint 返回 pool_saturated code 配套的 gateway_hint。
+func PoolSaturatedHint() string { return poolSaturatedHint }
+
 // FrameHintFunc 返回 SSE error 帧的 gateway_hint 判定函数（Stream 的可选参数）。
 // ctxFn 惰性求值：仅在实际撞到 error 帧才调用（正常流零开销，模型目录查询
 // 不会为每个成功请求触发）。

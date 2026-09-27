@@ -1,8 +1,13 @@
 package upstream
 
 import (
+	"fmt"
 	"net/http"
+	"sync"
 	"testing"
+	"time"
+
+	"github.com/dawn1115/lingjidan/internal/auth"
 )
 
 // TestClassifyZai 覆盖 Z.ai（Anthropic 信封）错误分类的关键分支。
@@ -263,5 +268,250 @@ func TestZaiIsEventStream(t *testing.T) {
 		if got := zaiIsEventStream(h); got != c.want {
 			t.Errorf("zaiIsEventStream(%q) = %v want %v", c.ct, got, c.want)
 		}
+	}
+}
+
+// zaiBillingBalanceBody 实测抓包的 /billing/balance 响应（2026-09-27，GLM 账号）：
+// 三个额度桶，含同名模型（GLM-5.3-Flash 一次性 3 亿 + 日窗 500 万，后者已用尽）。
+const zaiBillingBalanceBody = `{"code":0,"msg":"","logid":"x","data":{"server_time":1790495381,"plans":[],
+"balances":[
+{"bucket_id":"b1","show_name":"GLM-5.3-Flash","meter":"model_usage","unit_type":"token","total_units":300000000,"used_units":12920890,"remaining_units":287079110,"expires_at":1790557200},
+{"bucket_id":"b2","show_name":"GLM-5.3","meter":"model_usage","unit_type":"token","total_units":3000000,"used_units":351023,"remaining_units":2648977,"expires_at":1790524799},
+{"bucket_id":"b3","show_name":"GLM-5.3-Flash","meter":"model_usage","unit_type":"token","total_units":5000000,"used_units":5000000,"remaining_units":0,"expires_at":1790524799}
+]}}`
+
+// zaiTestClient 造一个 zai 域账号 + 指向本地假上游的 Client。
+func zaiTestClient(t *testing.T, fn rtFunc) (*Client, *auth.Auth) {
+	t.Helper()
+	c := testClient(fn)
+	c.ZaiBillingBase = "https://zcode.example/api/v1/zcode-plan"
+	a := &auth.Auth{UID: "tok-abc", AccessToken: "jwt-token"}
+	if _, err := auth.BackfillRealmFor(a, "zai"); err != nil {
+		t.Fatalf("backfill realm: %v", err)
+	}
+	return c, a
+}
+
+// TestZaiUserResourceAggregation 智谱额度查询：走 zcode.z.ai 的 billing/balance，
+// 各额度桶求和；并核对出站形态（GET + Bearer + X-Device-Mid，与官方客户端一致）。
+func TestZaiUserResourceAggregation(t *testing.T) {
+	c, a := zaiTestClient(t, func(r *http.Request) (*http.Response, error) {
+		if r.Method != http.MethodGet {
+			return nil, fmt.Errorf("want GET, got %s", r.Method)
+		}
+		if r.URL.Host != "zcode.example" || r.URL.Path != "/api/v1/zcode-plan/billing/balance" {
+			return nil, fmt.Errorf("wrong endpoint: %s%s", r.URL.Host, r.URL.Path)
+		}
+		if r.Header.Get("Authorization") != "Bearer jwt-token" {
+			return nil, fmt.Errorf("bad auth header: %q", r.Header.Get("Authorization"))
+		}
+		if r.Header.Get("X-Device-Mid") == "" {
+			return nil, fmt.Errorf("missing X-Device-Mid（上游会回 code 3001）")
+		}
+		if r.Header.Get("x-request-id") == "" {
+			return nil, fmt.Errorf("missing x-request-id")
+		}
+		return jsonResp(200, zaiBillingBalanceBody), nil
+	})
+	remain, total, err := c.UserResource(a)
+	if err != nil {
+		t.Fatalf("zai user resource: %v", err)
+	}
+	// remain = 287079110 + 2648977 + 0；total = 300000000 + 3000000 + 5000000。
+	if remain != 289728087 {
+		t.Errorf("remain=%d want 289728087", remain)
+	}
+	if total != 308000000 {
+		t.Errorf("total=%d want 308000000", total)
+	}
+}
+
+// TestUserResourceRoutesZaiRealm zai 域不得落到 CodeBuddy 的 billing base——
+// 回归：billingBase 只区分 cn/global，zai 账号曾被当成 CN 打 CodeBuddy 计费端点
+// 并被其 apisix 判 401（面板「刷新余额」必失败）。
+func TestUserResourceRoutesZaiRealm(t *testing.T) {
+	var hitCN bool
+	c, a := zaiTestClient(t, func(r *http.Request) (*http.Response, error) {
+		if r.URL.Host == "billing.example" {
+			hitCN = true
+			return jsonResp(401, `<html><head><title>401 Authorization Required</title></head></html>`), nil
+		}
+		if r.URL.Host != "zcode.example" {
+			return nil, fmt.Errorf("unexpected host: %s", r.URL.Host)
+		}
+		return jsonResp(200, zaiBillingBalanceBody), nil
+	})
+	if _, _, err := c.UserResource(a); err != nil {
+		t.Fatalf("zai 账号应走智谱 billing，实得错误: %v", err)
+	}
+	if hitCN {
+		t.Fatal("zai 账号被路由到了 CodeBuddy 计费端点（billingBase 未按 zai 分流）")
+	}
+	// 对照：cn 账号仍必须走 CodeBuddy（分流不得反向影响既有域）。
+	cnAcct := &auth.Auth{UID: "u1", AccessToken: "at"}
+	c2 := testClient(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Host != "billing.example" {
+			return nil, fmt.Errorf("cn 账号应走 CodeBuddy billing，实得 %s", r.URL.Host)
+		}
+		return jsonResp(200, `{"code":0,"data":{"Response":{"Data":{"Accounts":[{"PackageName":"p","CycleCapacitySize":100,"CycleCapacityRemain":60,"CycleCapacityUsed":40}]}}}}`), nil
+	})
+	remain, total, err := c2.UserResource(cnAcct)
+	if err != nil {
+		t.Fatalf("cn user resource: %v", err)
+	}
+	if remain != 60 || total != 100 {
+		t.Errorf("cn remain/total = %d/%d want 60/100", remain, total)
+	}
+}
+
+// TestZaiUserResourceExpiring 快过期子集：expires_at 落在 soon 窗口内的桶计入 expiring。
+func TestZaiUserResourceExpiring(t *testing.T) {
+	now := time.Now()
+	soon := now.Add(2 * time.Hour).Unix()
+	later := now.Add(400 * time.Hour).Unix()
+	body := fmt.Sprintf(`{"code":0,"data":{"balances":[
+		{"total_units":100,"remaining_units":40,"expires_at":%d},
+		{"total_units":200,"remaining_units":50,"expires_at":%d},
+		{"total_units":300,"remaining_units":0,"expires_at":%d}
+	]}}`, soon, later, soon)
+	c, a := zaiTestClient(t, func(*http.Request) (*http.Response, error) {
+		return jsonResp(200, body), nil
+	})
+	remain, total, expiring, err := c.UserResourceDetailed(a, 168*time.Hour)
+	if err != nil {
+		t.Fatalf("zai user resource detailed: %v", err)
+	}
+	if remain != 90 || total != 600 {
+		t.Errorf("remain/total = %d/%d want 90/600", remain, total)
+	}
+	// 仅第一个桶（40）在 2h 窗口内；第三个桶虽然也在此刻到期但剩余为 0，不计入。
+	if expiring != 40 {
+		t.Errorf("expiring=%d want 40", expiring)
+	}
+	// soon<=0 时禁用分桶（与 CodeBuddy 侧同口径）。
+	if _, _, exp, _ := c.UserResourceDetailed(a, 0); exp != 0 {
+		t.Errorf("soon<=0 时 expiring=%d want 0", exp)
+	}
+}
+
+// TestZaiUserResourceErrors 上游错误/空桶必须显式报错（不伪装成 0 额度成功）。
+func TestZaiUserResourceErrors(t *testing.T) {
+	t.Run("业务码非 0", func(t *testing.T) {
+		c, a := zaiTestClient(t, func(*http.Request) (*http.Response, error) {
+			return jsonResp(200, `{"code":3001,"msg":"parameter error: device_mid required"}`), nil
+		})
+		if _, _, err := c.UserResource(a); err == nil {
+			t.Fatal("code!=0 应报错")
+		}
+	})
+	t.Run("401 鉴权失败", func(t *testing.T) {
+		c, a := zaiTestClient(t, func(*http.Request) (*http.Response, error) {
+			return jsonResp(401, `<html><head><title>401 Authorization Required</title></head></html>`), nil
+		})
+		if _, _, err := c.UserResource(a); err == nil {
+			t.Fatal("401 应报错（不返回 0 额度冒充成功）")
+		}
+	})
+	t.Run("空额度桶", func(t *testing.T) {
+		c, a := zaiTestClient(t, func(*http.Request) (*http.Response, error) {
+			return jsonResp(200, `{"code":0,"data":{"balances":[]}}`), nil
+		})
+		if _, _, err := c.UserResource(a); err == nil {
+			t.Fatal("空桶应报错")
+		}
+	})
+}
+
+// ---------------------------------------------------------------------------
+// 验证码预解池（一次性消耗）
+// ---------------------------------------------------------------------------
+
+// withCaptchaPool 用给定参数预置全局池（不跑真实求解器），测试结束还原。
+func withCaptchaPool(t *testing.T, params ...string) *zaiCaptchaState {
+	t.Helper()
+	old := zaiCaptchaSolver
+	s := &zaiCaptchaState{}
+	now := time.Now()
+	for _, p := range params {
+		s.pool = append(s.pool, zaiCaptchaToken{param: p, fetchedAt: now})
+	}
+	zaiCaptchaSolver = s
+	t.Cleanup(func() { zaiCaptchaSolver = old })
+	return s
+}
+
+// TestZaiCaptchaTakeConsumes 参数**一次性**：取走即消耗，同一枚绝不二次发放。
+// 回归：旧实现把单枚参数缓存 45s 全员复用，并发下集体 3007。
+func TestZaiCaptchaTakeConsumes(t *testing.T) {
+	s := withCaptchaPool(t, "p1")
+	if got := s.take(); got != "p1" {
+		t.Fatalf("take=%q want p1", got)
+	}
+	if got := s.take(); got != "" {
+		t.Errorf("已取走的参数不得再次发放，实得 %q", got)
+	}
+}
+
+// TestZaiCaptchaTakeConcurrentDistinct 并发取参必须各自拿到**不同**的参数：
+// 复用同一枚是并发下连环 3007 的根因（回归守卫）。
+func TestZaiCaptchaTakeConcurrentDistinct(t *testing.T) {
+	const n = 20
+	params := make([]string, 0, n)
+	for i := 0; i < n; i++ {
+		params = append(params, fmt.Sprintf("p%d", i))
+	}
+	s := withCaptchaPool(t, params...)
+
+	var mu sync.Mutex
+	seen := map[string]int{}
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			p := s.take()
+			mu.Lock()
+			seen[p]++
+			mu.Unlock()
+		}()
+	}
+	wg.Wait()
+	if len(seen) != n {
+		t.Errorf("并发取到 %d 个不同参数 want %d（不得重复发放）", len(seen), n)
+	}
+	for p, c := range seen {
+		if c != 1 {
+			t.Errorf("参数 %q 被发放 %d 次（必须恰好一次）", p, c)
+		}
+	}
+}
+
+// TestZaiCaptchaEvictExpired 超龄库存必须丢弃（TTL 是库存保鲜期，不是复用窗口）。
+func TestZaiCaptchaEvictExpired(t *testing.T) {
+	s := withCaptchaPool(t)
+	s.pool = []zaiCaptchaToken{
+		{param: "fresh", fetchedAt: time.Now()},
+		{param: "stale", fetchedAt: time.Now().Add(-zaiCaptchaTokenTTL - time.Minute)},
+	}
+	if got := s.take(); got != "fresh" {
+		t.Fatalf("take=%q want fresh（超龄的应被丢弃）", got)
+	}
+	if got := s.take(); got != "" {
+		t.Errorf("超龄参数不得发放，实得 %q", got)
+	}
+}
+
+// TestInvalidateZaiCaptchaClearsPool 上游报挑战时清空整池（那批参数可能已被盯上）。
+func TestInvalidateZaiCaptchaClearsPool(t *testing.T) {
+	s := withCaptchaPool(t, "p1", "p2")
+	InvalidateZaiCaptcha()
+	if got := s.take(); got != "" {
+		t.Errorf("失效后池应为空，实得 %q", got)
+	}
+	s.mu.Lock()
+	n := len(s.pool)
+	s.mu.Unlock()
+	if n != 0 {
+		t.Errorf("池长度=%d want 0", n)
 	}
 }

@@ -13,6 +13,40 @@ import (
 	"github.com/dawn1115/lingjidan/internal/auth"
 )
 
+// TestInFlightSaturatedForModel 并发饱和谓词：仅在「账号对该模型健康且 in-flight 名额
+// 已满」时为真。tried 中的账号（刚被 fail 释放租约）与 realm 不符的账号都不算；
+// 禁用/冷却账号属「不可用」而非「忙」，也不在此列（否则真故障会被报成账号忙）。
+func TestInFlightSaturatedForModel(t *testing.T) {
+	p := New("")
+	a := &auth.Auth{UID: "zai-1"}
+	if _, err := auth.BackfillRealmFor(a, "zai"); err != nil {
+		t.Fatal(err)
+	}
+	p.Add(a)
+	p.SetMaxInFlight(1)
+
+	if p.InFlightSaturatedForModel(nil, "GLM-5.3", "zai") {
+		t.Error("名额未占满时不应判为饱和")
+	}
+	if !p.Acquire("zai-1") {
+		t.Fatal("acquire 失败")
+	}
+	if !p.InFlightSaturatedForModel(nil, "GLM-5.3", "zai") {
+		t.Error("账号健康 + 名额占满 → 应判为饱和")
+	}
+	if p.InFlightSaturatedForModel(map[string]bool{"zai-1": true}, "GLM-5.3", "zai") {
+		t.Error("tried 中的账号不应算作饱和（租约已释放，等它没有意义）")
+	}
+	if p.InFlightSaturatedForModel(nil, "GLM-5.3", "cn") {
+		t.Error("realm 不符不应算作饱和")
+	}
+	p.Release("zai-1")
+	p.Disable("zai-1", "test: unavailable")
+	if p.InFlightSaturatedForModel(nil, "GLM-5.3", "zai") {
+		t.Error("禁用账号属「不可用」，不应判为饱和")
+	}
+}
+
 // withNoPickGap 临时关闭防并发撞号窗口（minPickGap=0），让纯加权分布测试不受影响。
 func withNoPickGap(t *testing.T) {
 	t.Helper()

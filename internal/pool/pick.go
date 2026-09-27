@@ -281,6 +281,39 @@ func (p *Pool) inFlightFull(e *entry) bool {
 	return e.inFlight.Load() >= int64(limit)
 }
 
+// InFlightSaturatedForModel 报告「是否存在仅因并发名额占满而选不到的账号」：
+// 该账号对本模型健康（未禁用/未冷却/未撞模型级避让——即 healthyForModel 成立）、
+// 且不在 tried 中，但 inFlight 已到上限。
+//
+// 为什么要单独判它：pick 会把在途占满的账号跳过，全冷却兜底也跳过——当池内候选
+// 只剩这类账号时 pick 返回 nil，handler 若一律按「无可用账号」上报，就把**瞬时
+// 繁忙**误报成**账号全挂**（客户端显示 "all accounts are temporarily unavailable"，
+// 运维也看不出真相）。单账号域（如 zai）最易触发：1 个账号 × max_in_flight=3，
+// 第 4 个并发请求必然走到这里。调用方据此等槽重试，而非直接失败。
+//
+// tried 排除本轮已试过的账号：它们刚被 fail() 释放了租约、并发名额并不占满，
+// 若把「自己的失败重试」也算成饱和，就会在真错误上做无意义的等待。
+func (p *Pool) InFlightSaturatedForModel(tried map[string]bool, reqModel, realm string) bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	now := time.Now()
+	for uid, e := range p.byUID {
+		if tried != nil && tried[uid] {
+			continue
+		}
+		if realm != "" && e.a.Realm() != realm {
+			continue
+		}
+		if !e.healthyForModel(now, reqModel) {
+			continue
+		}
+		if p.inFlightFull(e) {
+			return true
+		}
+	}
+	return false
+}
+
 // minPickGap 防并发撞号窗口：同一账号在该窗口内不重复被选中（除非 top5 全部刚被用过）。
 // 生产默认 100ms；纯加权分布测试可临时置 0 关闭防撞号。
 var minPickGap = 100 * time.Millisecond
