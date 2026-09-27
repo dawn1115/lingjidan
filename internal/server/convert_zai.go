@@ -19,6 +19,11 @@ package server
 //     writeRaw 原样透传（绕过 normalizeFrame 白名单），错误信息无损到达客户端。
 //   - usage 帧：message_start 带 prompt_tokens、message_delta 带 completion_tokens
 //     /total_tokens（chatStatsReader 取末帧，后帧覆盖 → 最终值正确）。
+//   - tool_use → OpenAI tool_calls 帧：必须是规范形状（id/type + function.name /
+//     function.arguments 嵌套），index 用 0 起的工具序号而非 Anthropic block 序号。
+//     平铺的 name/arguments（或稀疏 index）会让客户端取不到工具名（WorkBuddy/CodeBuddy
+//     按 tc.function?.name 解析）→ 工具永不执行 → 客户端用同一上下文反复重问 →
+//     模型重复输出同一段思考 → 被客户端判「模型循环」并中断（issue：zai 工具链路）。
 
 import (
 	"bufio"
@@ -415,7 +420,7 @@ func zaiContentBlocks(content any) []any {
 }
 
 // zaiUserBlocks user 数组 content：text 直映；image_url 仅支持 base64 data URL
-//（Z.ai Anthropic 兼容层接受 base64 source）；远端 http URL / 音频等不支持，
+// （Z.ai Anthropic 兼容层接受 base64 source）；远端 http URL / 音频等不支持，
 // 返回错误由调用方 400 透传（不静默丢内容——丢图换回答是静默降级，比报错更糟）。
 func zaiUserBlocks(content any) ([]any, error) {
 	arr, ok := content.([]any)
@@ -513,12 +518,18 @@ type zaiStreamState struct {
 	model       string
 	inputTokens int
 	blocks      map[int]string // Anthropic block index → content_block type
+	// toolIndex Anthropic block index → 出站 tool_calls.index（0 起递增的工具序号）。
+	// 不能直接用 block index：Anthropic 的 block 序号含 text/thinking 块，出现思考时
+	// 首个 tool_use 可能落在 1/2…，而 OpenAI 客户端（WorkBuddy/CodeBuddy）按
+	// tool_calls.index 归位片段，稀疏起点会让片段找不到所属调用（工具不执行）。
+	toolIndex map[int]int
+	toolSeq   int
 }
 
 // zaiPumpSSE 逐事件读 Anthropic SSE 并写出 OpenAI 帧，直到 EOF 或写失败。
 func zaiPumpSSE(rc io.ReadCloser, w io.Writer) error {
 	br := bufio.NewReaderSize(rc, 64*1024)
-	st := &zaiStreamState{w: w, blocks: map[int]string{}}
+	st := &zaiStreamState{w: w, blocks: map[int]string{}, toolIndex: map[int]int{}}
 	event := ""
 	for {
 		line, rerr := br.ReadString('\n')
@@ -619,16 +630,22 @@ func (st *zaiStreamState) onBlockStart(obj map[string]any) error {
 	case "tool_use":
 		id, _ := cb["id"].(string)
 		name, _ := cb["name"].(string)
+		// 出站必须是 OpenAI 规范形状：name/arguments 嵌在 function 对象内（客户端
+		// 按 tool_calls[].function.name 取工具名，平铺的 name 会被丢弃 → 工具不执行）。
+		ti := st.toolSeq
+		st.toolSeq++
+		st.toolIndex[i] = ti
 		return st.emitDelta(map[string]any{"tool_calls": []any{map[string]any{
-			"index": i, "id": id, "type": "function", "name": name, "arguments": "",
+			"index": ti, "id": id, "type": "function",
+			"function": map[string]any{"name": name, "arguments": ""},
 		}}})
 	}
 	return nil
 }
 
 // onBlockDelta 增量转换：text_delta→content、thinking_delta→reasoning_content、
-// input_json_delta→tool_calls arguments 分片（index 对齐 block 序号，Aggregate
-// 按 index 归并）。
+// input_json_delta→tool_calls.function.arguments 分片（index 用该 tool_use 块的
+// 出站工具序号，Aggregate 按 index 归并）。
 func (st *zaiStreamState) onBlockDelta(obj map[string]any) error {
 	idx, _ := obj["index"].(float64)
 	d, _ := obj["delta"].(map[string]any)
@@ -643,8 +660,15 @@ func (st *zaiStreamState) onBlockDelta(obj map[string]any) error {
 		}
 	case "input_json_delta":
 		if p, _ := d["partial_json"].(string); p != "" {
+			// index 用该 tool_use 块的出站序号（与首片一致）；未见首片时（上游丢帧）
+			// 回落 block 序号兜底——好过丢弃分片让参数残缺。
+			ti, ok := st.toolIndex[int(idx)]
+			if !ok {
+				ti = int(idx)
+			}
 			return st.emitDelta(map[string]any{"tool_calls": []any{map[string]any{
-				"index": int(idx), "arguments": p,
+				"index":    ti,
+				"function": map[string]any{"arguments": p},
 			}}})
 		}
 	}

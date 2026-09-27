@@ -1,9 +1,14 @@
 package server
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"io"
+	"strings"
 	"testing"
+
+	"github.com/dawn1115/lingjidan/internal/upstream"
 )
 
 // zaiDecodeOut 测试辅助：把转换结果解成 map。
@@ -222,4 +227,169 @@ func mustConvert(t *testing.T, in, jwt string) []byte {
 		t.Fatalf("zaiConvertRequest: %v", err)
 	}
 	return out
+}
+
+// ---------------------------------------------------------------------------
+// 响应方向：Anthropic SSE → OpenAI SSE
+// ---------------------------------------------------------------------------
+
+// zaiPumpRaw 跑一遍流转换，返回写出的全部 OpenAI SSE 文本。
+func zaiPumpRaw(t *testing.T, sse string) string {
+	t.Helper()
+	var buf bytes.Buffer
+	if err := zaiPumpSSE(io.NopCloser(strings.NewReader(sse)), &buf); err != nil {
+		t.Fatalf("zaiPumpSSE: %v", err)
+	}
+	return buf.String()
+}
+
+// zaiPumpFrames 从转换结果里取全部 data 帧载荷（不含 [DONE]）。
+func zaiPumpFrames(t *testing.T, sse string) []string {
+	t.Helper()
+	var frames []string
+	for _, line := range strings.Split(zaiPumpRaw(t, sse), "\n") {
+		payload, ok := strings.CutPrefix(strings.TrimRight(line, "\r\n"), "data: ")
+		if !ok || payload == "[DONE]" {
+			continue
+		}
+		frames = append(frames, payload)
+	}
+	return frames
+}
+
+// zaiStreamToolSSE 造一条「thinking 块 + 两个 tool_use 块」的上游 Anthropic 事件流。
+// 关键点：tool_use 的 block index 是 1/2（被 index 0 的 thinking 块占位），
+// 正是真实 GLM-5.3 出思考后再调工具时的形状。
+func zaiStreamToolSSE() string {
+	return strings.Join([]string{
+		`event: message_start`,
+		`data: {"type":"message_start","message":{"id":"msg_1","model":"glm-5.3","usage":{"input_tokens":100}}}`,
+		``,
+		`event: content_block_start`,
+		`data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}`,
+		``,
+		`event: content_block_delta`,
+		`data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"先看目录。"}}`,
+		``,
+		`event: content_block_stop`,
+		`data: {"type":"content_block_stop","index":0}`,
+		``,
+		`event: content_block_start`,
+		`data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"call_a","name":"read_file"}}`,
+		``,
+		`event: content_block_delta`,
+		`data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"path\":"}}`,
+		``,
+		`event: content_block_delta`,
+		`data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"\"/tmp/a.txt\"}"}}`,
+		``,
+		`event: content_block_stop`,
+		`data: {"type":"content_block_stop","index":1}`,
+		``,
+		`event: content_block_start`,
+		`data: {"type":"content_block_start","index":2,"content_block":{"type":"tool_use","id":"call_b","name":"write_file"}}`,
+		``,
+		`event: content_block_delta`,
+		`data: {"type":"content_block_delta","index":2,"delta":{"type":"input_json_delta","partial_json":"{}"}}`,
+		``,
+		`event: content_block_stop`,
+		`data: {"type":"content_block_stop","index":2}`,
+		``,
+		`event: message_delta`,
+		`data: {"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"input_tokens":100,"output_tokens":20}}`,
+		``,
+		`event: message_stop`,
+		`data: {"type":"message_stop"}`,
+		``,
+	}, "\n")
+}
+
+// TestZaiStreamToolCallsShape 出站 tool_calls 必须是 OpenAI 规范形状且 index 从 0 起：
+// 此前 name/arguments 平铺在 tool_call 顶层、index 直接用 Anthropic block 序号，
+// 客户端（WorkBuddy/CodeBuddy 按 tool_calls[].function.name 解析）取不到工具名 →
+// 工具永不执行 → 反复重问同一请求 → 被判「模型循环」中断。
+func TestZaiStreamToolCallsShape(t *testing.T) {
+	var toolFrames []map[string]any
+	for _, frame := range zaiPumpFrames(t, zaiStreamToolSSE()) {
+		var obj map[string]any
+		if err := json.Unmarshal([]byte(frame), &obj); err != nil {
+			t.Fatalf("帧非 JSON: %v (%s)", err, frame)
+		}
+		choices, _ := obj["choices"].([]any)
+		if len(choices) == 0 {
+			continue
+		}
+		c, _ := choices[0].(map[string]any)
+		delta, _ := c["delta"].(map[string]any)
+		tcs, _ := delta["tool_calls"].([]any)
+		for _, tci := range tcs {
+			tc, _ := tci.(map[string]any)
+			toolFrames = append(toolFrames, tc)
+		}
+	}
+	// 首片 ×2（两个 tool_use）+ 参数片 ×3。
+	if len(toolFrames) != 5 {
+		t.Fatalf("tool_calls 帧数 = %d want 5: %v", len(toolFrames), toolFrames)
+	}
+	for i, tc := range toolFrames {
+		if _, flat := tc["name"]; flat {
+			t.Errorf("第 %d 片 name 平铺在 tool_call 顶层（客户端取不到工具名）: %v", i, tc)
+		}
+		if _, flat := tc["arguments"]; flat {
+			t.Errorf("第 %d 片 arguments 平铺在 tool_call 顶层（客户端拼不出参数）: %v", i, tc)
+		}
+		if _, ok := tc["function"].(map[string]any); !ok {
+			t.Errorf("第 %d 片缺 function 对象: %v", i, tc)
+		}
+	}
+	wantIdx := []float64{0, 0, 0, 1, 1} // thinking 块占位不影响：两个工具必须是 0/1
+	for i, want := range wantIdx {
+		if got, _ := toolFrames[i]["index"].(float64); got != want {
+			t.Errorf("第 %d 片 index = %v want %v（不能用 Anthropic block 序号）", i, got, want)
+		}
+	}
+}
+
+// TestZaiStreamToolCallsAggregate 端到端：转换后的帧过 Aggregate（非流式客户端路径）
+// 必须还原出带 function.name/arguments 的完整工具调用，而不是丢名字的空壳。
+func TestZaiStreamToolCallsAggregate(t *testing.T) {
+	raw, err := upstream.Aggregate(strings.NewReader(zaiPumpRaw(t, zaiStreamToolSSE())))
+	if err != nil {
+		t.Fatalf("Aggregate: %v", err)
+	}
+	// JSON 往返：断言客户端真正收到的线格式（Aggregate 内部用 []map[string]any）。
+	buf, _ := json.Marshal(raw)
+	var resp map[string]any
+	if err := json.Unmarshal(buf, &resp); err != nil {
+		t.Fatalf("decode aggregated response: %v", err)
+	}
+	choices, _ := resp["choices"].([]any)
+	if len(choices) != 1 {
+		t.Fatalf("choices = %d want 1", len(choices))
+	}
+	c, _ := choices[0].(map[string]any)
+	if c["finish_reason"] != "tool_calls" {
+		t.Errorf("finish_reason = %v want tool_calls", c["finish_reason"])
+	}
+	msg, _ := c["message"].(map[string]any)
+	if msg["reasoning_content"] != "先看目录。" {
+		t.Errorf("reasoning_content = %v want 先看目录。", msg["reasoning_content"])
+	}
+	calls, _ := msg["tool_calls"].([]any)
+	if len(calls) != 2 {
+		t.Fatalf("tool_calls = %d want 2: %v", len(calls), msg["tool_calls"])
+	}
+	first, _ := calls[0].(map[string]any)
+	ffn, _ := first["function"].(map[string]any)
+	if first["id"] != "call_a" || ffn["name"] != "read_file" {
+		t.Errorf("第一个调用身份不符: %v", first)
+	}
+	if ffn["arguments"] != `{"path":"/tmp/a.txt"}` {
+		t.Errorf("arguments = %v want {\"path\":\"/tmp/a.txt\"}（分片拼接）", ffn["arguments"])
+	}
+	second, _ := calls[1].(map[string]any)
+	sfn, _ := second["function"].(map[string]any)
+	if second["id"] != "call_b" || sfn["name"] != "write_file" || sfn["arguments"] != "{}" {
+		t.Errorf("第二个调用不符: %v", second)
+	}
 }

@@ -30,7 +30,9 @@ import (
 )
 
 // appVersion 网关版本（领鸡蛋助手：面板 + 任务体系 + Z.ai 通道），透出到 /panel/api/overview。
-const appVersion = "1.11.8"
+// 1.11.9：Z.ai 工具链路修复（tool_use → OpenAI tool_calls 规范嵌套 + index 归零）
+// + 裸名 Z.ai 目录精确别名（GLM-5.3 等官方拼写裸名路由到 zai 域）。
+const appVersion = "1.11.9"
 
 // usagePathFor 由 state 文件路径推出用量文件路径：同目录、文件名 usage.json。
 // 这样 config 里改 state_file 时用量数据跟着走，不需要额外配置项。
