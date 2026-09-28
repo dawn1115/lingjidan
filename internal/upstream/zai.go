@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math/rand/v2"
 	"net/http"
 	"strings"
 	"time"
@@ -121,6 +122,16 @@ func ClassifyZai(status int, body string) ErrKind {
 	if hasBusinessCode(body, "1005") {
 		return ErrModelQuota
 	}
+	// 3009「model concurrency limit exceeded」：上游对该**模型**设的并发上限（实测随
+	// HTTP 429 承载）。它是瞬时容量冲突而非账号故障——同账号稍后重试即可成功，
+	// 请求内退避重试由 ZaiChatStreamContext 负责。
+	// 必须先于下方 rate_limit_error→ErrSoftRate：按软限流处理会给账号 600s 软冷却，
+	// 而 zai 域常只有一个账号 → 一次并发冲突就把整个域冻结 10 分钟，把 agent 工作流
+	// 直接打断（用户可见 429 + rate_limit_exceeded）。这与 1113/1005 同哲学：
+	// 只认结构化业务码，不靠文案猜测。
+	if hasBusinessCode(body, "3009") {
+		return ErrModelConcurrency
+	}
 	// 3012「unusual activity」上游风控（实测 HTTP 405 承载，社区亦见 200 信封）。
 	// 按账号级软冷却 + IP 级 fail-fast 处理：继续换号重打只会加剧风控。
 	if hasBusinessCode(body, "3012") || strings.Contains(lower, "unusual activity") {
@@ -223,21 +234,94 @@ func (c *Client) zaiChatHTTP() *http.Client {
 // 返回值语义与 ChatStreamContext 一致：成功返回原始 SSE 流（Anthropic 事件流），
 // 错误路径返回已分类 *Error（Kind 信封 + Retry-After 解析）。
 //
-// 验证码挑战在本函数内**同账号重试**（zaiCaptchaRetries）：verifyParam 实际 TTL
-// 仅数十秒，跨 TTL 复用会被拒；验证码问题不是账号问题，故不轮转不罚号，失效缓存
-// 重解后重试一次（对齐社区实现「换码重试一次」语义）。
+// 请求内重试两条独立轨道（都在**同账号**上，均不轮转、不罚号）：
+//   - 验证码挑战（3007）：verifyParam 实际 TTL 仅数十秒，跨 TTL 复用会被拒；
+//     验证码问题不是账号问题，故失效缓存重解后重试（zaiCaptchaRetries 次）。
+//   - 模型并发上限（3009）：上游对模型的并发窗口被占满时的**瞬时**拒绝（实测
+//     0.x 秒即返回）。退避等一个在途请求结束后重试即可成功（zaiConcurrencyRetries 次）。
+//     若不在本层重试，3009 会穿透到策略层被当作 rate_limit_error → 账号软冷却
+//     600s，单账号域（zai）随即整域不可用 → agent 工作流被打断。
 func (c *Client) ZaiChatStreamContext(ctx context.Context, a *auth.Auth, body []byte) (rc io.ReadCloser, status int, respBody []byte, err error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	for attempt := 0; ; attempt++ {
+	captchaTries, concTries := 0, 0
+	for {
 		rc, status, respBody, err = c.zaiChatOnce(ctx, a, body)
-		if attempt >= zaiCaptchaRetries || !zaiCaptchaChallenge(status, respBody) {
-			return rc, status, respBody, err
+		if captchaTries < zaiCaptchaRetries && zaiCaptchaChallenge(status, respBody) {
+			InvalidateZaiCaptcha()
+			captchaTries++
+			log.Printf("WARN: [upstream] zai_chat acct=%s: 验证码挑战（status=%d），已失效缓存重解并重试（第 %d/%d 次）",
+				logfmt.Label(a.UID, a.Nickname), status, captchaTries, zaiCaptchaRetries)
+			continue
 		}
-		InvalidateZaiCaptcha()
-		log.Printf("WARN: [upstream] zai_chat acct=%s: 验证码挑战（status=%d），已失效缓存重解并重试（第 %d/%d 次）",
-			logfmt.Label(a.UID, a.Nickname), status, attempt+1, zaiCaptchaRetries)
+		if concTries < zaiConcurrencyRetries && zaiConcurrencyRejected(respBody) {
+			wait := zaiConcurrencyBackoff(concTries)
+			concTries++
+			log.Printf("WARN: [upstream] zai_chat acct=%s: 上游模型并发上限（3009），%.1fs 后同账号重试（第 %d/%d 次）",
+				logfmt.Label(a.UID, a.Nickname), wait.Seconds(), concTries, zaiConcurrencyRetries)
+			if !sleepUpstreamCtx(ctx, wait) {
+				return rc, status, respBody, err // 客户端断连/ctx 取消：不再等待
+			}
+			continue
+		}
+		return rc, status, respBody, err
+	}
+}
+
+// zaiConcurrencyRetries 3009（模型并发上限）的请求内重试次数上限。
+// 等待序列 0.7s/1.4s/2.8s/5s/5s…（±25% 抖动），8 次合计约 30s：覆盖「等一个在途
+// 请求结束」的典型时长，又不至于把客户端拖到超时。
+const zaiConcurrencyRetries = 8
+
+// zaiConcurrencyBase / zaiConcurrencyCap 3009 退避的基数与封顶。
+// base 是 var（非 const）以便测试置 0 跳过真实等待。
+var zaiConcurrencyBase = 700 * time.Millisecond
+
+const zaiConcurrencyCap = 5 * time.Second
+
+// zaiConcurrencyRejected 报告响应体是否为上游模型并发上限（3009）。
+// 只认结构化业务码：429+rate_limit_error 信封也可能是 1113/3009 等不同语义，
+// 文案在状态码之间不稳定。
+func zaiConcurrencyRejected(body []byte) bool {
+	if len(body) == 0 {
+		return false
+	}
+	return hasBusinessCode(string(body), "3009")
+}
+
+// zaiConcurrencyBackoff 第 n 次（0 基）3009 重试前的等待：base·2^n 封顶 cap，±25% 抖动。
+// 抖动打散多请求同相位重试（齐步走的退避会以固定周期再次聚团撞上限）。
+func zaiConcurrencyBackoff(n int) time.Duration {
+	d := zaiConcurrencyBase
+	if d <= 0 {
+		return 0
+	}
+	for k := 0; k < n && d < zaiConcurrencyCap; k++ {
+		d *= 2
+	}
+	if d > zaiConcurrencyCap {
+		d = zaiConcurrencyCap
+	}
+	out := time.Duration(float64(d) * (1 + (rand.Float64()*2-1)*0.25))
+	if out <= 0 {
+		return d
+	}
+	return out
+}
+
+// sleepUpstreamCtx 可取消等待（3009 退避用）：ctx 取消立即返回 false，等满返回 true。
+func sleepUpstreamCtx(ctx context.Context, d time.Duration) bool {
+	if d <= 0 {
+		return ctx.Err() == nil
+	}
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-t.C:
+		return true
 	}
 }
 
@@ -373,6 +457,10 @@ func zaiEnvelopeKind(code int) ErrKind {
 		// 验证码挑战：正常路径已由 zaiCaptchaChallenge 重试消化，走到这里说明
 		// 重解后仍被拒。验证码问题不是账号问题，不重罚。
 		return ErrClient
+	case 3009:
+		// 「model concurrency limit exceeded」：与 4xx 承载路径同一语义（见 ClassifyZai）。
+		// 信封承载时同样必须是瞬时可重试类，不得落 ErrSoftRate 触发账号冷却。
+		return ErrModelConcurrency
 	default:
 		return ErrClient
 	}

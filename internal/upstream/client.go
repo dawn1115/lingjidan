@@ -42,6 +42,7 @@ const (
 	ErrImageInvalid                  // 图片请求格式/数据无效 → 请求级错误：不罚号、不轮转，末端透传原文
 	ErrModelQuota                    // Z.ai 业务码 1005「exceed quota limit」→ **模型级**额度耗尽（日池），(账号,模型) 避让
 	ErrClient                        // 其他 4xx / 业务错误
+	ErrModelConcurrency              // Z.ai 业务码 3009「model concurrency limit exceeded」→ 上游模型级并发上限（瞬时容量冲突，非账号故障）
 )
 
 func (k ErrKind) String() string {
@@ -74,6 +75,8 @@ func (k ErrKind) String() string {
 		return "account_fault"
 	case ErrClient:
 		return "client"
+	case ErrModelConcurrency:
+		return "model_concurrency"
 	default:
 		return "none"
 	}

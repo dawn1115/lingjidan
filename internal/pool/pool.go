@@ -50,6 +50,11 @@ type Pool struct {
 	// maxInFlightGlobal global 域单账号在途上限分档（WAF 403 修复 P1-1：global 域
 	// WAF 风控更紧，压低并发）；0 = 未设置，回落 maxInFlight（不分档，零回归）。
 	maxInFlightGlobal int
+	// maxInFlightZai zai 域单账号在途上限分档；0 = 未设置，回落 maxInFlight。
+	// 依据：上游对每个**模型**另设并发上限（超限即 429 + code 3009「model concurrency
+	// limit exceeded」），网关侧并发开得比上游大只会换来一连串 3009。压低单号并发，
+	// 让超出的请求在网关内排队等名额（handler 的饱和等槽），而不是打到上游被拒。
+	maxInFlightZai int
 	// randInt64N 仅供测试注入确定性随机源；nil 时用 math/rand/v2 全局源。
 	// 生产代码不应设置此字段。
 	randInt64N func(n int64) int64
@@ -205,10 +210,23 @@ func (p *Pool) SetMaxInFlightGlobal(n int) {
 	}
 }
 
-// inFlightLimit 报告账号的生效在途上限（global 分档优先，回落 maxInFlight）；
+// SetMaxInFlightZai 注入 zai 域单账号在途上限（上游模型并发上限分档，见
+// maxInFlightZai 字段注释）；0 = 未设置，zai 账号回落 maxInFlight。负值保留原值。
+func (p *Pool) SetMaxInFlightZai(n int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if n >= 0 {
+		p.maxInFlightZai = n
+	}
+}
+
+// inFlightLimit 报告账号的生效在途上限（realm 分档优先，回落 maxInFlight）；
 // 0 = 不限。调用方需已持 p.mu（或快照过 limit，见 Acquire）。
 func (p *Pool) inFlightLimit(e *entry) int {
-	if p.maxInFlightGlobal > 0 && e.a.Realm() == "global" {
+	switch {
+	case p.maxInFlightZai > 0 && e.a.Realm() == "zai":
+		return p.maxInFlightZai
+	case p.maxInFlightGlobal > 0 && e.a.Realm() == "global":
 		return p.maxInFlightGlobal
 	}
 	return p.maxInFlight

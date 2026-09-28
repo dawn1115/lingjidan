@@ -1,8 +1,11 @@
 package upstream
 
 import (
+	"context"
 	"fmt"
+	"io"
 	"net/http"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -513,5 +516,92 @@ func TestInvalidateZaiCaptchaClearsPool(t *testing.T) {
 	s.mu.Unlock()
 	if n != 0 {
 		t.Errorf("池长度=%d want 0", n)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 3009 模型并发上限（瞬时冲突，不得按软限流罚号）
+// ---------------------------------------------------------------------------
+
+// TestClassifyZaiModelConcurrency 3009 必须是独立的 ErrModelConcurrency 而非
+// ErrSoftRate —— 后者会让策略层给账号 600s 软冷却，单账号 zai 域随即整域不可用
+// （回归：实测 2026-09-27 22:48 一次 3009 把唯一 zai 账号冻结到 22:58，agent 工作流中断）。
+func TestClassifyZaiModelConcurrency(t *testing.T) {
+	body := `{"code":3009,"msg":"model concurrency limit exceeded","logid":"202609271448505403831f736569004754"}`
+	for _, status := range []int{429, 400, 403} {
+		if got := ClassifyZai(status, body); got != ErrModelConcurrency {
+			t.Errorf("ClassifyZai(%d, 3009 body)=%v want ErrModelConcurrency", status, got)
+		}
+	}
+	// 对照：429 + rate_limit_error 信封（无 3009）仍是软限流。
+	if got := ClassifyZai(429, `{"type":"error","error":{"type":"rate_limit_error","message":"slow down"}}`); got != ErrSoftRate {
+		t.Errorf("429+rate_limit_error=%v want ErrSoftRate（不要误伤既有语义）", got)
+	}
+	// 对照：200 业务信封承载的 3009 也走同一语义。
+	if got := zaiEnvelopeKind(3009); got != ErrModelConcurrency {
+		t.Errorf("zaiEnvelopeKind(3009)=%v want ErrModelConcurrency", got)
+	}
+}
+
+// zaiConcurrencyTestClient 造一个 zai 域账号 + 假上游（跳过验证码求解与真实退避）。
+func zaiConcurrencyTestClient(t *testing.T, fn rtFunc) (*Client, *auth.Auth) {
+	t.Helper()
+	t.Setenv("ZCODE_CAPTCHA_DISABLED", "1")
+	old := zaiConcurrencyBase
+	zaiConcurrencyBase = 0 // 不在测试里真等待
+	t.Cleanup(func() { zaiConcurrencyBase = old })
+	c := testClient(fn)
+	a := &auth.Auth{UID: "tok-x", AccessToken: "jwt"}
+	return c, a
+}
+
+// TestZaiChatRetriesModelConcurrency 3009 后必须**同账号退避重试**并最终成功：
+// 上游并发窗口被占满是瞬时状态，稍后重试即可成功（这是「工作流不被打断」的核心）。
+func TestZaiChatRetriesModelConcurrency(t *testing.T) {
+	var calls int
+	c, a := zaiConcurrencyTestClient(t, func(*http.Request) (*http.Response, error) {
+		calls++
+		if calls <= 2 {
+			return jsonResp(429, `{"code":3009,"msg":"model concurrency limit exceeded"}`), nil
+		}
+		return &http.Response{
+			StatusCode: 200,
+			Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+			Body:       io.NopCloser(strings.NewReader("event: message_stop\ndata: {}\n\n")),
+		}, nil
+	})
+	rc, status, _, err := c.ZaiChatStreamContext(context.Background(), a, []byte(`{}`))
+	if err != nil || status != 200 {
+		t.Fatalf("status=%d err=%v；3009 应被请求内重试消化", status, err)
+	}
+	if rc != nil {
+		rc.Close()
+	}
+	if calls != 3 {
+		t.Errorf("上游调用次数=%d want 3（两次 3009 后成功）", calls)
+	}
+}
+
+// TestZaiChatConcurrencyRetryBudgetBounded 重试次数必须有界：预算耗尽后返回**已分类**
+// 的 ErrModelConcurrency（策略层据此零动作），不得无限重试、也不得退化成 ErrSoftRate。
+func TestZaiChatConcurrencyRetryBudgetBounded(t *testing.T) {
+	var calls int
+	c, a := zaiConcurrencyTestClient(t, func(*http.Request) (*http.Response, error) {
+		calls++
+		return jsonResp(429, `{"code":3009,"msg":"model concurrency limit exceeded"}`), nil
+	})
+	_, status, _, err := c.ZaiChatStreamContext(context.Background(), a, []byte(`{}`))
+	if status != 429 {
+		t.Errorf("status=%d want 429", status)
+	}
+	ue, ok := err.(*Error)
+	if !ok {
+		t.Fatalf("err 类型=%T want *Error", err)
+	}
+	if ue.Kind != ErrModelConcurrency {
+		t.Errorf("Kind=%v want ErrModelConcurrency", ue.Kind)
+	}
+	if want := 1 + zaiConcurrencyRetries; calls != want {
+		t.Errorf("上游调用次数=%d want %d（1 次首发 + %d 次重试，有界）", calls, want, zaiConcurrencyRetries)
 	}
 }

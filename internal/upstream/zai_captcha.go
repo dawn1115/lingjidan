@@ -44,13 +44,18 @@ const (
 // 参数是一次性的（见 zaiCaptchaState）。
 const zaiCaptchaTokenTTL = 95 * time.Second
 
-// zaiCaptchaPoolMin / zaiCaptchaPoolMax 预解池的目标库存与上限
-// （对齐社区验证实现 zcode2api 的 CAPTCHA_POOL_MIN/MAX 默认值 3/10）。
-// 热路径从池里取一枚（亚毫秒），取走后异步补货——避免每个请求都等一次求解
-// （求解要起 Node 子进程，单次数秒）。上限防库存无限堆积。
+// zaiCaptchaPoolMin / zaiCaptchaPoolMax 预解池的目标库存与上限。
+// 热路径从池里取一枚（亚毫秒），取走后异步补货——避免每个请求都等一次求解。
+//
+// 存货量按「突发并发」定，而非按平均值：存 3 枚时，agent 一轮并发就能把池抽干，
+// 之后每个请求都要**在机器满载时同步现解**——实测此时 pe VM 频繁 stall（单次
+// 求解 1.5s 的健康路径退化成 5×7s 全败），请求被卡 60s 以上并拖垮在途名额，
+// 连带把后续请求逼成 pool_saturated（用户可见 503）。
+// 存 6 枚（上限 24）后，常见突发可整轮从存货取参，求解始终发生在空闲期。
+// 正常求解仅 ~1.5s/枚，预解成本很低；TTL 95s 保证存货不会长期滞留。
 const (
-	zaiCaptchaPoolMin = 3
-	zaiCaptchaPoolMax = 10
+	zaiCaptchaPoolMin = 6
+	zaiCaptchaPoolMax = 24
 )
 
 // zaiCaptchaTimeout 单次求解子进程超时（求解器内部另有 ~25s 自超时）。

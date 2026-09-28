@@ -127,6 +127,7 @@ type Config struct {
 	Pool struct {
 		MaxInFlight        int    `json:"max_in_flight"`        // 单账号最大在途请求数，0 = 不限
 		MaxInFlightGlobal  int    `json:"max_in_flight_global"` // global 域单账号在途上限（WAF 风控紧域压低并发），0 = 回落默认 2
+		MaxInFlightZai     int    `json:"max_in_flight_zai"`    // zai 域单账号在途上限（上游模型并发上限，超限即 3009），0 = 回落默认 4
 		BreakerThreshold   int    `json:"breaker_threshold"`    // 连续失败次数触发熔断，默认 3
 		BreakerCooldown    string `json:"breaker_cooldown"`     // 基础熔断时长，默认 "30m"
 		BreakerCooldownMax string `json:"breaker_cooldown_max"` // 指数退避封顶，默认 "6h"
@@ -207,6 +208,10 @@ func Default() *Config {
 	// P1-1）；0/负数 normalize 回落默认（与 max_in_flight 的 0=不限语义不同，分档键
 	// 的 0 没有合理语义，回退分档默认最稳）。
 	c.Pool.MaxInFlightGlobal = 2
+	// MaxInFlightZai 缺省 4：上游对模型另设并发上限，超限即 429 + code 3009
+	//「model concurrency limit exceeded」。网关侧并发开得比上游大只会换来一连串 3009
+	//（每个请求还要多等一轮退避重试），压低到 4 让超出的请求在网关内排队等名额。
+	c.Pool.MaxInFlightZai = 4
 	c.Pool.BreakerThreshold = 3
 	c.Pool.BreakerCooldown = "30m"
 	c.Pool.BreakerCooldownMax = "6h"
@@ -445,6 +450,10 @@ func (c *Config) normalize() error {
 	// global 在途分档：0/负数视为未设置回落默认 2（WAF 403 修复 P1-1）。
 	if c.Pool.MaxInFlightGlobal <= 0 {
 		c.Pool.MaxInFlightGlobal = 2
+	}
+	// zai 在途分档：0/负数回落默认 4（上游模型并发上限，见 MaxInFlightZai 字段注释）。
+	if c.Pool.MaxInFlightZai <= 0 {
+		c.Pool.MaxInFlightZai = 4
 	}
 	if c.Pool.IdleWeightPerHour <= 0 {
 		c.Pool.IdleWeightPerHour = 0.5
