@@ -314,6 +314,62 @@ func (p *Pool) InFlightSaturatedForModel(tried map[string]bool, reqModel, realm 
 	return false
 }
 
+// ModelBlockedThroughout 报告「请求模型在**全部**候选账号上都被 (账号,模型) 负缓存
+// 避让」这一形态，并返回最早解封时刻与对应原因。
+//
+// 为什么需要它：单账号域（zai）里唯一的号撞上游模型级额度（1005 日额度耗尽）后，
+// 选号侧 healthyForModel 全程避开它 → pick 返回 nil。此时 handler 若按「无可用账号」
+// 上报，就把**模型级额度/权限问题**说成了**账号全挂**：用户看到 "all accounts are
+// temporarily unavailable" 会去查一个并不存在的账号故障，客户端也拿不到解封时刻，
+// 既不知道等多久、也不知道该换模型（同一账号的其它模型往往仍有额度，见 1005 条目的
+// 注释：GLM-5.3 与 GLM-5.3-Flash 额度池独立）。
+//
+// ok 的成立条件（必须全部满足；否则成因不唯一，调用方应保持既有「无可用账号」口径）：
+//   - reqModel 非空（空模型名不走模型级判定）；
+//   - 域内存在至少一个未被 tried 排除的账号，且这些账号**全部**满足：
+//     账号级健康（未禁用、未处于账号级冷却/熔断/降权）**且** 该模型正处于模型级
+//     冷却（modelCooled）。
+//
+// 「账号级健康」是必要条件：账号若同时在账号级冷却中，失败成因属于账号而非模型，
+// 按模型级上报会把账号故障说成额度问题（反向误报，同样有害）。
+//
+// until 取最早解封时刻（任一账号解封即可能恢复该模型的可用性），reason 取自该账号
+// 条目（负缓存原因由写入方决定：1005 额度 / 11102 无此模型 / 6004 模型级限流）。
+// 调用方需已排除 tried 中的账号（本轮已试过的号不再代表后续可用的候选集）。
+func (p *Pool) ModelBlockedThroughout(tried map[string]bool, reqModel, realm string) (until time.Time, reason string, ok bool) {
+	if reqModel == "" {
+		return time.Time{}, "", false
+	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	now := time.Now()
+	n := 0
+	for uid, e := range p.byUID {
+		if tried != nil && tried[uid] {
+			continue
+		}
+		if realm != "" && e.a.Realm() != realm {
+			continue
+		}
+		// 账号级不可用（禁用/冷却/熔断/降权）→ 成因不是模型，交回既有口径。
+		if !e.healthy(now) {
+			return time.Time{}, "", false
+		}
+		mc, blocked := e.modelCooldowns[reqModel]
+		if !blocked || mc.Until.IsZero() || !now.Before(mc.Until) {
+			return time.Time{}, "", false // 存在对该模型可用的候选 → 与模型级封锁无关
+		}
+		n++
+		if until.IsZero() || mc.Until.Before(until) {
+			until, reason = mc.Until, mc.Reason
+		}
+	}
+	if n == 0 {
+		return time.Time{}, "", false
+	}
+	return until, reason, true
+}
+
 // minPickGap 防并发撞号窗口：同一账号在该窗口内不重复被选中（除非 top5 全部刚被用过）。
 // 生产默认 100ms；纯加权分布测试可临时置 0 关闭防撞号。
 var minPickGap = 100 * time.Millisecond

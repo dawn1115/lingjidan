@@ -64,6 +64,10 @@ func GatewayHint(kind ErrKind, msg string, ctx HintContext) string {
 	case ErrModelQuota:
 		// Z.ai 额度按模型分池：同一账号其它模型可能仍有额度。
 		return "this model's daily quota is exhausted; switch model or retry after the quota resets"
+	case ErrModelConcurrency:
+		// 上游模型级并发窗口被占满（网关已按 zaiConcurrencyRetries 退避重试到预算耗尽）。
+		// 对客户端的动作是「稍后重试」——不是账号或额度问题，换号无益。
+		return "model is handling other concurrent requests at upstream; retry shortly"
 	case ErrContentBlocked:
 		// 措辞不含 "upstream"：content_blocked 响应有不含上游字样的既有口径
 		// （handler_test 的泄漏守卫），hint 遵守同一口径。
@@ -98,6 +102,21 @@ const poolSaturatedHint = "all accounts are busy at their concurrency limit; ret
 
 // PoolSaturatedHint 返回 pool_saturated code 配套的 gateway_hint。
 func PoolSaturatedHint() string { return poolSaturatedHint }
+
+// ModelUnavailableHint 返回「请求模型在全部候选账号上都被上游避让」（model_unavailable /
+// model_quota_exceeded code）配套的 gateway_hint。
+//
+// 与 noHealthyHint 必须分开：那是「池里没有可用的号」，这里是**号是好的、只是这个模型
+// 现在不能用**（模型级日额度/权限/限流）。对客户端的动作也不同——不是换号重试，而是
+// 切到同账号的其它模型、或等到解封时刻再来（额度按模型分池，其它模型往往仍有量）。
+// reason 为空时不拼括号（不编造原因）。
+func ModelUnavailableHint(model, reason string) string {
+	h := "model " + model + " is unavailable on every account"
+	if s := strings.TrimSpace(reason); s != "" {
+		h += " (" + s + ")"
+	}
+	return h + "; switch model or retry after the unblock time"
+}
 
 // FrameHintFunc 返回 SSE error 帧的 gateway_hint 判定函数（Stream 的可选参数）。
 // ctxFn 惰性求值：仅在实际撞到 error 帧才调用（正常流零开销，模型目录查询

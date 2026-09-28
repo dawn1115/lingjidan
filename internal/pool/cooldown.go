@@ -113,6 +113,24 @@ const (
 	modelBlockMaxTTL  = 24 * time.Hour
 )
 
+// modelQuotaFloorTTL 1005 条目贴到额度重置边界时的最短封锁时长（见 BlockModelBackoff）。
+const modelQuotaFloorTTL = time.Minute
+
+// zaiQuotaReset 返回 Z.ai 模型日额度桶的下一次重置时刻（次日 00:00，UTC+8）。
+//
+// 依据（上游 /billing/balance 原文实证）：entitlement period="daily"，
+// period_start=1790524800（= 2026-09-28 00:00:00 CST）/ period_end=1790611199
+// （= 2026-09-28 23:59:59 CST）为 CST 自然日边界；同响应 server_time 与本机时钟
+// 一致（无时差，边界不因客户端时区偏移）。
+//
+// 用固定 +08:00 而非 time.Local：额度边界由上游按 CST 定义，与网关主机时区无关
+// （把主机换到别的时区不该改变"何时可以重试"）。
+func zaiQuotaReset(now time.Time) time.Time {
+	cst := time.FixedZone("CST", 8*60*60)
+	n := now.In(cst)
+	return time.Date(n.Year(), n.Month(), n.Day()+1, 0, 0, 0, 0, cst)
+}
+
 // BlockModelBackoff 11102「该后端无此模型」的 (账号, 模型) 负缓存入口
 // （handler.applyErrorPolicy 调用）。复用 modelCooldowns 机制（不新建平行状态）：
 // 写 modelCooldowns[model]，Until 为指数退避 TTL，选号侧 healthyForModel 自动对该
@@ -143,6 +161,22 @@ func (p *Pool) BlockModelBackoff(uid, model, reason string) {
 		ttl = d
 	} else {
 		ttl = modelBlockMaxTTL
+	}
+	// 模型**日额度**（1005）的封锁不得越过额度重置边界：额度按自然日重置，而上面的
+	// 退避 TTL 是 6h 起、可升到 24h。撞额度只发生在当天（当天池子打满），若照 TTL
+	// 封锁，解封时刻会晚于次日 00:00 的重置最多十几个小时——用户在额度已恢复的时段
+	// 继续吃 model_unavailable，只能手工解冻。
+	// 语义是**截断**而非对齐：当日首次命中仍按 6h 退避（不足 6h 就重置的时段直接截到
+	// 边界），命中升级后的 12h/24h 才会被边界吃掉——这样边界附近不会因为上游结算有
+	// 延迟（00:00 探测撞回 1005）而一次性封满一整天。
+	// hits 计数保留只为状态台账一致（对长 TTL 档已不起作用）。
+	if strings.HasPrefix(reason, "1005") {
+		if d := zaiQuotaReset(now).Sub(now); d < ttl {
+			if d < modelQuotaFloorTTL {
+				d = modelQuotaFloorTTL // 贴边（如 23:59:5x）不至于让条目瞬间过期而反复重写
+			}
+			ttl = d
+		}
 	}
 	if e.modelCooldowns == nil {
 		e.modelCooldowns = map[string]modelCooldown{}

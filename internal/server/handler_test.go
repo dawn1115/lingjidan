@@ -1594,6 +1594,37 @@ func TestCustomModeFingerprintSanitizePreserved(t *testing.T) {
 	}
 }
 
+// TestApplyErrorPolicyModelConcurrencyNoCooldown 3009（上游模型并发上限）必须零动作：
+// 不冷却、不熔断、不喂连败计数。回归：曾落 ErrSoftRate → 唯一 zai 账号被冻结 600s，
+// 单账号域整个 10 分钟不可用（客户端看到 429 rate_limit_exceeded），agent 工作流被打断。
+func TestApplyErrorPolicyModelConcurrencyNoCooldown(t *testing.T) {
+	za := &auth.Auth{UID: "zai-1", AccessToken: "at-zai"}
+	if _, err := auth.BackfillRealmFor(za, "zai"); err != nil {
+		t.Fatal(err)
+	}
+	p := pool.New("")
+	p.Add(za)
+	h := NewHandler(Config{Pool: p, SoftCooldown: 600 * time.Second})
+
+	body := `{"code":3009,"msg":"model concurrency limit exceeded","logid":"202609271448505403831f736569004754"}`
+	for i := 1; i <= 3; i++ {
+		h.applyErrorPolicy("zai-1", upstream.ErrModelConcurrency, body, "GLM-5.3", nil)
+		st, _ := p.Status("zai-1")
+		if st.Cooling {
+			t.Fatalf("call %d: 3009 不得冷却账号（cooling=%v reason=%s cool_remaining_sec=%d）",
+				i, st.Cooling, st.Reason, st.CoolRemaining)
+		}
+		if st.SoftStreak != 0 {
+			t.Errorf("call %d: 不得推进 soft_streak，got %d", i, st.SoftStreak)
+		}
+	}
+	// 对照：真正的 429 软限流仍必须冷却（未误伤既有语义）。
+	h.applyErrorPolicy("zai-1", upstream.ErrSoftRate, body, "GLM-5.3", nil)
+	if st, _ := p.Status("zai-1"); !st.Cooling {
+		t.Error("ErrSoftRate 仍应冷却账号（分流不得误伤既有路径）")
+	}
+}
+
 // TestChatSaturatedReportsPoolSaturated 并发名额占满（账号健康、仅 in-flight 拉满）时
 // 必须报 pool_saturated，而非 no_healthy_account —— 前者是「账号忙」（等槽/重试即可恢复），
 // 后者是「账号不可用」。回归：单账号域（zai：1 号 × 并发上限）曾把瞬时饱和误报成
@@ -1626,6 +1657,83 @@ func TestChatSaturatedReportsPoolSaturated(t *testing.T) {
 	}
 	if strings.Contains(body, "no_healthy_account") {
 		t.Errorf("不得复用 no_healthy_account（账号并非不可用）：%s", body)
+	}
+}
+
+// TestChatModelQuotaReportsModelQuotaExceeded 请求模型在**全部**候选号上被 (账号,模型)
+// 负缓存（Z.ai 1005 模型日额度耗尽）时，必须报精确的 model_quota_exceeded，而不是
+// no_healthy_account —— 后者措辞是「所有账号暂不可用」，会把「该模型今天没额度了」
+// 说成「账号全挂」：用户去查一个并不存在的账号故障，也拿不到解封时刻、无从判断该
+// 切模型还是该等。生产形态：zai 域只有一个号，GLM-5.3 日额度打满（上游 billing
+// 实证 remaining_units=0），而 GLM-5.3-Flash 额度独立、仍可用。
+func TestChatModelQuotaReportsModelQuotaExceeded(t *testing.T) {
+	za := &auth.Auth{UID: "zai-1", AccessToken: "at-zai", ExpiresAt: 9999999999}
+	if _, err := auth.BackfillRealmFor(za, "zai"); err != nil {
+		t.Fatal(err)
+	}
+	p := testPoolWith(za)
+	p.BlockModelBackoff("zai-1", "GLM-5.3", "1005 exceed quota limit (model daily quota)")
+	var calls int
+	up := newFakeUpstream(t, func(string) (int, string, bool) {
+		calls++
+		return 200, sseOK, true
+	})
+	h := NewHandler(Config{Pool: p, Upstream: up})
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions",
+		strings.NewReader(`{"model":"zai:GLM-5.3","stream":true,"messages":[{"role":"user","content":"hi"}]}`)))
+	body := rec.Body.String()
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("code=%d body=%s want 429（模型额度耗尽与末端 ErrModelQuota 透传同口径）", rec.Code, body)
+	}
+	if !strings.Contains(body, "model_quota_exceeded") {
+		t.Errorf("应报 model_quota_exceeded，实得 body=%s", body)
+	}
+	if strings.Contains(body, "no_healthy_account") {
+		t.Errorf("不得复用 no_healthy_account（账号是好的，只是该模型没额度）：%s", body)
+	}
+	if !strings.Contains(body, "retry after") {
+		t.Errorf("message 应带解封时刻供客户端定时重试：%s", body)
+	}
+	if !strings.Contains(body, "GLM-5.3") || !strings.Contains(body, "gateway_hint") {
+		t.Errorf("hint 应点名模型并指出可切模型：%s", body)
+	}
+	if calls != 0 {
+		t.Errorf("账号已被该模型负缓存避让 → 不应向上游发请求，实得 calls=%d", calls)
+	}
+	// 账号本身未被处罚（模型级额度不是账号故障）：不得冷却/禁用。
+	if st, _ := p.Status("zai-1"); st.Cooling || st.Disabled {
+		t.Errorf("模型级额度耗尽不得冷却/禁用账号：cooling=%v disabled=%v", st.Cooling, st.Disabled)
+	}
+}
+
+// TestChatModelBlockedReportsModelUnavailable 对照：负缓存原因不是额度（11102 该后端
+// 无此模型 / 6004 模型级限流）时，报 model_unavailable（503，沿用既有状态码，只把
+// 笼统 code 换成可分支的精确值）。
+func TestChatModelBlockedReportsModelUnavailable(t *testing.T) {
+	za := &auth.Auth{UID: "zai-1", AccessToken: "at-zai", ExpiresAt: 9999999999}
+	if _, err := auth.BackfillRealmFor(za, "zai"); err != nil {
+		t.Fatal(err)
+	}
+	p := testPoolWith(za)
+	p.BlockModelBackoff("zai-1", "GLM-5.3", upstream.ModelBlockReason)
+	h := NewHandler(Config{Pool: p, Upstream: newFakeUpstream(t, func(string) (int, string, bool) {
+		return 200, sseOK, true
+	})})
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions",
+		strings.NewReader(`{"model":"zai:GLM-5.3","stream":true,"messages":[{"role":"user","content":"hi"}]}`)))
+	body := rec.Body.String()
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("code=%d body=%s want 503（沿用既有状态码）", rec.Code, body)
+	}
+	if !strings.Contains(body, "model_unavailable") {
+		t.Errorf("应报 model_unavailable，实得 body=%s", body)
+	}
+	if strings.Contains(body, "no_healthy_account") || strings.Contains(body, "pool_saturated") {
+		t.Errorf("不得复用账号级/饱和 code：%s", body)
 	}
 }
 

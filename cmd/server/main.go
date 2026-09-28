@@ -37,7 +37,18 @@ import (
 // 单账号域（zai）并发超上限时的 503 由"账号全挂"语义修正为"账号忙"。
 // 1.11.12：验证码参数改为预解池（一次性消耗、取走即补货）。旧实现把单枚参数缓存 45s
 // 全员复用，并发下必然集体 3007 → 频繁 503。
-const appVersion = "1.11.12"
+// 1.11.13：上游 3009「model concurrency limit exceeded」按瞬时冲突处理——请求内退避
+// 重试（不再让账号吃 600s 软冷却，单账号 zai 域一次冲突就整域冻结）；新增 zai 域
+// 在途分档 max_in_flight_zai（低于上游模型并发上限，超出者网关内排队）。
+// 1.11.14：验证码预解池存货 3 → 6（上限 24）。存 3 枚时一轮突发即抽干，随后在满载下
+// 同步现解会导致 pe VM stall（5×7s 全败）→ 请求卡 60s+ → 连带 pool_saturated。
+// 1.11.15：模型级不可用不再误报 no_healthy_account。请求模型在**全部**候选号上被
+// (账号,模型) 负缓存避让时（Z.ai 1005 模型日额度耗尽 / 11102 无此模型 / 6004 模型级
+// 限流），报 model_quota_exceeded(429) / model_unavailable(503) 并带解封时刻——旧行为
+// 落进末端兜底，把"该模型今天没额度了"说成"所有账号暂不可用"（用户查不到不存在的
+// 账号故障，也无从判断该切模型还是该等）。同版把 1005 条目的封锁 TTL 截断到次日
+// 00:00（CST）额度重置边界，避免解封晚于额度恢复最多十几小时。
+const appVersion = "1.11.15"
 
 // usagePathFor 由 state 文件路径推出用量文件路径：同目录、文件名 usage.json。
 // 这样 config 里改 state_file 时用量数据跟着走，不需要额外配置项。
@@ -103,6 +114,7 @@ func main() {
 	p.SetBreaker(cfg.Pool.BreakerThreshold, cfg.BreakerCooldownDur, cfg.BreakerCooldownMaxD)
 	p.SetMaxInFlight(cfg.Pool.MaxInFlight)
 	p.SetMaxInFlightGlobal(cfg.Pool.MaxInFlightGlobal) // global 域 WAF 风控分档（P1-1）
+	p.SetMaxInFlightZai(cfg.Pool.MaxInFlightZai)       // zai 域上游模型并发上限分档（3009）
 	p.SetDegrade(cfg.Pool.DegradeThreshold, cfg.DegradeCooldownDur, cfg.DegradeCooldownMaxD)
 	p.SetSoftRateMax(cfg.SoftRateMaxDur)                 // 软冷却指数退避封顶（soft_rate_max，默认 2h）
 	p.SetCostExploreInterval(cfg.CostExploreIntervalDur) // costTier 探索窗口（issue #136，默认 30m；0 关停）
@@ -418,6 +430,7 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 	p.SetBreaker(newCfg.Pool.BreakerThreshold, newCfg.BreakerCooldownDur, newCfg.BreakerCooldownMaxD)
 	p.SetMaxInFlight(newCfg.Pool.MaxInFlight)
 	p.SetMaxInFlightGlobal(newCfg.Pool.MaxInFlightGlobal)
+	p.SetMaxInFlightZai(newCfg.Pool.MaxInFlightZai) // zai 域并发分档热生效（3009 缓解）
 	p.SetDegrade(newCfg.Pool.DegradeThreshold, newCfg.DegradeCooldownDur, newCfg.DegradeCooldownMaxD)
 	p.SetSoftRateMax(newCfg.SoftRateMaxDur)
 	p.SetCostExploreInterval(newCfg.CostExploreIntervalDur) // costTier 探索窗口热生效（0 关停）

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -693,11 +694,10 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		if acct == nil {
 			// 无候选分两种语义，此前一律 break → 都被报成「所有账号暂不可用」：
 			//   - **账号忙**：账号健康（healthyForModel 成立）但 in-flight 名额被并发
-			//     请求占满。单账号域（zai：1 号 × max_in_flight=3）并发超上限时必然
-			//     走到这里。等槽即可恢复，不该判为失败。
+			//     请求占满。单账号域（zai）并发超上限时必然走到这里。等槽即可恢复，不该判为失败。
 			//   - **账号不可用**：冷却/禁用/该模型被 6004·11102 避让。换号与等待都无意义。
-			// 等槽有界（slotWaitTries），且不消耗 MaxRotate 轮转预算（i--）。
-			if slotWaits < slotWaitTries && h.cfg.Pool.InFlightSaturatedForModel(tried, bareModel, realm) {
+			// 等槽有界（slotWaitTriesFor，按 realm 分档），且不消耗 MaxRotate 轮转预算（i--）。
+			if slotWaits < slotWaitTriesFor(realm) && h.cfg.Pool.InFlightSaturatedForModel(tried, bareModel, realm) {
 				if !sleepCtx(r.Context(), slotWaitStep) {
 					saturated = true
 					break // 客户端已断连：等槽无意义
@@ -705,6 +705,16 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				slotWaits++
 				i--
 				continue
+			}
+			// 模型级不可用：账号级健康，但该模型在**全部**候选号上都被 (账号,模型)
+			// 负缓存避让（Z.ai 1005 模型日额度耗尽 / 11102 无此模型 / 6004 模型级限流）。
+			// 报精确 code 而非落进末端 no_healthy_account —— 后者措辞是"所有账号暂不
+			// 可用"，会把"该模型今天没额度了"说成"账号全挂"：用户去查并不存在的账号
+			// 故障，客户端也拿不到解封时刻、无从判断该切模型还是该等（判定条件见
+			// pool.ModelBlockedThroughout）。
+			if until, reason, blocked := h.cfg.Pool.ModelBlockedThroughout(tried, bareModel, realm); blocked {
+				st.status = writeModelUnavailable(w, bareModel, until, reason)
+				return
 			}
 			// 等过槽仍未拿到名额 → 按容量饱和上报；否则是真正的无可用账号。
 			saturated = slotWaits > 0
@@ -1176,6 +1186,14 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 		// 与 11102 条目的差异仅在 reason（不参与 BlockModelClear 的 11102 前缀判定，
 		// 由 TTL 到期自然解除）。
 		h.cfg.Pool.BlockModelBackoff(uid, model, "1005 exceed quota limit (model daily quota)")
+	case upstream.ErrModelConcurrency:
+		// 3009 上游模型级并发上限：**瞬时容量冲突，不是账号故障**（上游 0.x 秒即返回，
+		// 等一个在途请求结束后同账号重试即可成功）。零动作——不冷却、不熔断、不喂
+		// 连败计数（同 ErrPromptTooLong 待遇）。此前它落 ErrSoftRate → CooldownSoftRate
+		// 600s：zai 域常只有一个账号，一次并发冲突就把整个域冻结 10 分钟，agent 工作流
+		// 直接被打断（用户可见 429 rate_limit_exceeded）。
+		// 请求内退避重试由 upstream 层负责（zaiConcurrencyRetries）；走到这里说明重试
+		// 预算已耗尽，交给既有轮转/末端透传继续处理（换号可命中不同账号的并发窗口）。
 	default:
 		// 其余（ErrClient/ErrNone）：只换号不罚（防雪崩），不喂熔断。
 		// ErrClient（未知 4xx）喂连败计数（issue #114）：连续 N 次该形态失败 →
@@ -1224,6 +1242,17 @@ const slotWaitTries = 15
 
 var slotWaitStep = 200 * time.Millisecond
 
+// slotWaitTriesFor 饱和等槽的尝试次数上限（按 realm 分档）。
+// zai：上游对该模型另设并发上限，而 zai 常是单账号域——并发请求只能排队等名额释放。
+// 快速放弃会把 agent 工作流打断（用户诉求「不被打断」），故给足 60s 窗口
+// （300 × slotWaitStep=200ms）；其余域维持 3s 既有口径（快速失败 + 客户端自会重试）。
+func slotWaitTriesFor(realm string) int {
+	if realm == "zai" {
+		return 300
+	}
+	return slotWaitTries
+}
+
 // writeOpenAIErrorHint 同 writeOpenAIError，另在 error 对象上附加
 // error.gateway_hint（hint 为空串时不带字段——未覆盖形态不编造）。
 // message 仍是上游原文透传（hint 只做并列补充，绝不替换/包装 message）。
@@ -1240,6 +1269,30 @@ func writeOpenAIErrorHint(w http.ResponseWriter, status int, code, msg, hint str
 			"gateway_hint": hint,
 		},
 	})
+}
+
+// writeModelUnavailable 上报「请求模型在全部候选账号上都被上游避让」并返回所用 HTTP
+// 状态码（供调用方写 st.status 观测）。两种口径：
+//   - 负缓存原因以 1005 开头（模型日额度耗尽）→ 429 + model_quota_exceeded，
+//     与末端 ErrModelQuota 透传分支同码同状态（该分支只在**本次请求真打到上游**时
+//     触发；账号已被负缓存避让时请求根本不出网，走不到那里，故此处补齐）。
+//   - 其余（11102 该后端无此模型 / 6004 模型级限流）→ 503 + model_unavailable，
+//     状态码沿用既有 503，只把笼统的 code 换成可分支的精确值。
+//
+// message 与 hint 都带模型名与解封时刻：客户端据此切模型或定时重试，而非盲目重试。
+// 时刻取负缓存条的 Until（网关自己的避让台账，非上游承诺），措辞用 "after" 不写
+// "resets at"——不把我们的退避时长冒充上游的额度重置墙钟。
+func writeModelUnavailable(w http.ResponseWriter, model string, until time.Time, reason string) int {
+	status := http.StatusServiceUnavailable
+	code := "model_unavailable"
+	msg := fmt.Sprintf("model %s is unavailable on all accounts; retry after %s", model, until.Format(time.RFC3339))
+	if strings.HasPrefix(reason, "1005") {
+		status = http.StatusTooManyRequests
+		code = "model_quota_exceeded"
+		msg = fmt.Sprintf("model %s quota exhausted on all accounts; switch model or retry after %s", model, until.Format(time.RFC3339))
+	}
+	writeOpenAIErrorHint(w, status, code, msg, upstream.ModelUnavailableHint(model, reason))
+	return status
 }
 
 // hasImagePart 报告聊天请求体是否携带多模态 image_url part（OpenAI 兼容形态

@@ -47,6 +47,185 @@ func TestInFlightSaturatedForModel(t *testing.T) {
 	}
 }
 
+// TestInFlightLimitRealmTiers realm 分档在途上限：zai 档优先于全局档（上游模型并发
+// 上限低于网关全局并发，超限即 3009）。zai 档生效时按该值拒绝占名额。
+func TestInFlightLimitRealmTiers(t *testing.T) {
+	p := New("")
+	zai := &auth.Auth{UID: "zai-1"}
+	if _, err := auth.BackfillRealmFor(zai, "zai"); err != nil {
+		t.Fatal(err)
+	}
+	p.Add(zai)
+	p.SetMaxInFlight(8)    // 全局档（宽松）
+	p.SetMaxInFlightZai(4) // zai 档（上游模型并发限制）
+	p.SetMaxInFlightGlobal(2)
+
+	for i := 1; i <= 4; i++ {
+		if !p.Acquire("zai-1") {
+			t.Fatalf("第 %d 次占名额应成功（zai 档上限 4）", i)
+		}
+	}
+	if p.Acquire("zai-1") {
+		t.Error("zai 档上限为 4：第 5 次应被拒绝（不得回落到全局档 8）")
+	}
+	if !p.InFlightSaturatedForModel(nil, "GLM-5.3", "zai") {
+		t.Error("占满 zai 档名额后应判为并发饱和")
+	}
+	// 清零 zai 档 → 回落全局档 8（分档键 0 的既有语义：未设置即不分档）。
+	p.SetMaxInFlightZai(0)
+	if !p.Acquire("zai-1") {
+		t.Error("zai 档清零后应回落到全局档（8），第 5 次仍可占名额")
+	}
+}
+
+// TestModelBlockedThroughout 模型级封锁遍及谓词：只有当域内**全部**未 tried 账号都
+// 「账号级健康 + 该模型在负缓存中」时才成立（此时失败原因唯一是模型，可精确上报）。
+// 任一账号对该模型可用、或成因含账号级故障（冷却/禁用），都必须回落到「无可用账号」
+// 的既有口径——把账号故障说成模型额度问题是同等有害的反向误报。
+func TestModelBlockedThroughout(t *testing.T) {
+	const quota1005 = "1005 exceed quota limit (model daily quota)"
+	newAcct := func(uid, realm string) *auth.Auth {
+		a := &auth.Auth{UID: uid}
+		if _, err := auth.BackfillRealmFor(a, realm); err != nil {
+			t.Fatal(err)
+		}
+		return a
+	}
+
+	// ── A：单账号域（生产形态：zai 只有一个号）──────────────────────────────
+	p := New("")
+	if _, _, ok := p.ModelBlockedThroughout(nil, "GLM-5.3", "zai"); ok {
+		t.Error("空池不应判定为模型级不可用")
+	}
+	p.Add(newAcct("zai-1", "zai"))
+	if _, _, ok := p.ModelBlockedThroughout(nil, "GLM-5.3", "zai"); ok {
+		t.Error("账号对该模型无封锁（可选）→ 不应判定为模型级不可用")
+	}
+	p.BlockModelBackoff("zai-1", "GLM-5.3", quota1005)
+	until, reason, ok := p.ModelBlockedThroughout(nil, "GLM-5.3", "zai")
+	if !ok {
+		t.Fatal("唯一账号被该模型负缓存 → 应判定为模型级不可用")
+	}
+	if reason != quota1005 {
+		t.Errorf("reason 应取自负缓存条目，实得 %q", reason)
+	}
+	if !until.After(time.Now()) {
+		t.Errorf("until 应为未来时刻，实得 %v", until)
+	}
+	// 其它模型不受影响（额度按模型分池）：GLM-5.3-Flash 仍可选。
+	if _, _, ok := p.ModelBlockedThroughout(nil, "GLM-5.3-Flash", "zai"); ok {
+		t.Error("未被负缓存的模型不应判定为模型级不可用")
+	}
+	// 空模型名 / realm 不符 / tried 排除：均不走模型级判定。
+	if _, _, ok := p.ModelBlockedThroughout(nil, "", "zai"); ok {
+		t.Error("空模型名不应判定为模型级不可用")
+	}
+	if _, _, ok := p.ModelBlockedThroughout(nil, "GLM-5.3", "cn"); ok {
+		t.Error("realm 不符的账号不应参与本域判定")
+	}
+	if _, _, ok := p.ModelBlockedThroughout(map[string]bool{"zai-1": true}, "GLM-5.3", "zai"); ok {
+		t.Error("tried 排除后候选集为空，成因不唯一，不应判定为模型级不可用")
+	}
+	// 账号级冷却叠加：成因可能是账号故障 → 不得归因给模型。
+	// （Cooldown 按既有语义清空 modelCooldowns，故解除冷却后需重写负缓存。）
+	p.Cooldown("zai-1", CoolSoft, time.Minute, "429 rate limit")
+	if _, _, ok := p.ModelBlockedThroughout(nil, "GLM-5.3", "zai"); ok {
+		t.Error("账号处于账号级冷却时，不应把成因归给模型")
+	}
+	p.Cooldown("zai-1", CoolSoft, -time.Second, "429 rate limit") // 令冷却过期
+	p.BlockModelBackoff("zai-1", "GLM-5.3", quota1005)            // 重写负缓存
+	if _, _, ok := p.ModelBlockedThroughout(nil, "GLM-5.3", "zai"); !ok {
+		t.Error("账号级冷却过期后应恢复模型级判定")
+	}
+	// 禁用账号同理（禁用是账号级「不可用」，与模型额度无关）。
+	p.Disable("zai-1", "test: banned")
+	if _, _, ok := p.ModelBlockedThroughout(nil, "GLM-5.3", "zai"); ok {
+		t.Error("禁用账号不应归因给模型")
+	}
+	p.ReviveDisabled("zai-1")
+	p.BlockModelBackoff("zai-1", "GLM-5.3", quota1005)
+	if _, _, ok := p.ModelBlockedThroughout(nil, "GLM-5.3", "zai"); !ok {
+		t.Error("复活后应恢复模型级判定")
+	}
+
+	// ── B：多账号域（存在可用号即不成立；全封锁时 until/reason 取最早解封者）──
+	q := New("")
+	q.Add(newAcct("zai-1", "zai"))
+	q.Add(newAcct("zai-2", "zai"))
+	q.BlockModelBackoff("zai-1", "GLM-5.3", quota1005)
+	if _, _, ok := q.ModelBlockedThroughout(nil, "GLM-5.3", "zai"); ok {
+		t.Error("zai-2 对该模型可用（换号即可成功）→ 不应判定为模型级不可用")
+	}
+	// 两个号都被封锁 → 成立，且取最早解封者。用「zai-2 连命中 3 次 → TTL 升到 24h
+	// 封顶」制造明确可区分的到期时刻，避免依赖两次写入的墙钟先后（Windows 时钟粒度
+	// 下可能相等，而 map 遍历顺序不确定，会让「最早」判定变成随机）。
+	// zai-1 保持上面那次单命中（TTL 6h，最早），无需重写。
+	for i := 0; i < 3; i++ {
+		q.BlockModelBackoff("zai-2", "GLM-5.3", "11102 no such model on this backend")
+	}
+	until2, reason2, ok := q.ModelBlockedThroughout(nil, "GLM-5.3", "zai")
+	if !ok {
+		t.Fatal("两个号都被该模型负缓存 → 应判定为模型级不可用")
+	}
+	if reason2 != quota1005 {
+		t.Errorf("reason 应取最早解封条目（zai-1 的 1005），实得 %q", reason2)
+	}
+	if d := time.Until(until2); d > 7*time.Hour {
+		t.Errorf("until 应取最早解封者（≈6h），实得 %v", d)
+	}
+	// 跨域账号（cn）对该模型无封锁，但 realm 过滤后不参与 zai 判定。
+	q.Add(newAcct("cn-1", "cn"))
+	if _, _, ok := q.ModelBlockedThroughout(nil, "GLM-5.3", "zai"); !ok {
+		t.Error("跨域账号不应打破 zai 域的模型级判定")
+	}
+}
+
+// TestBlockModelBackoffQuotaCappedToDailyReset 1005（模型日额度）条目的封锁不得越过
+// 次日 00:00（CST）的额度重置边界：纯退避 TTL 是 6h 起、可升到 24h，而额度按自然日
+// 重置——照 TTL 封锁会让解封晚于重置最多十几个小时，用户在额度已恢复的时段继续吃
+// model_unavailable（只能手工解冻）。11102（该后端无此模型）不按日重置，不受此限。
+func TestBlockModelBackoffQuotaCappedToDailyReset(t *testing.T) {
+	newAcct := func(uid string) *auth.Auth {
+		a := &auth.Auth{UID: uid}
+		if _, err := auth.BackfillRealmFor(a, "zai"); err != nil {
+			t.Fatal(err)
+		}
+		return a
+	}
+	p := New("")
+	p.Add(newAcct("zai-1"))
+
+	// 连命中 5 次把纯退避 TTL 推到 24h 封顶（旧实现正是这样封到次日同一时刻）。
+	const quota1005 = "1005 exceed quota limit (model daily quota)"
+	for i := 0; i < 5; i++ {
+		p.BlockModelBackoff("zai-1", "GLM-5.3", quota1005)
+	}
+	until, _, ok := p.ModelBlockedThroughout(nil, "GLM-5.3", "zai")
+	if !ok {
+		t.Fatal("应判定为模型级不可用")
+	}
+	// 边界 +1min：贴边命中时 modelQuotaFloorTTL 允许最多越过边界 1 分钟（防条目瞬间过期）。
+	if limit := zaiQuotaReset(time.Now()).Add(modelQuotaFloorTTL); until.After(limit) {
+		t.Errorf("1005 条目不得越过额度重置边界：until=%v 上限=%v", until, limit)
+	}
+
+	// 对照：11102 不是按日重置的事实，维持既有 6h→24h 退避（不被额度边界改写）。
+	for i := 0; i < 5; i++ {
+		p.BlockModelBackoff("zai-1", "GLM-5.4", upstreamBlockReason)
+	}
+	u2, _, ok2 := p.ModelBlockedThroughout(nil, "GLM-5.4", "zai")
+	if !ok2 {
+		t.Fatal("应判定为模型级不可用")
+	}
+	if d := time.Until(u2); d < 23*time.Hour {
+		t.Errorf("11102 不应被额度重置边界截断（应保持 24h 封顶退避），实得 %v", d)
+	}
+}
+
+// upstreamBlockReason 11102 负缓存 reason（与 upstream.ModelBlockReason 同字形；
+// pool 包不引 upstream，此处以字面量固定契约：reason 前缀决定 TTL 是否对齐额度边界）。
+const upstreamBlockReason = "11102 no such model on this backend"
+
 // withNoPickGap 临时关闭防并发撞号窗口（minPickGap=0），让纯加权分布测试不受影响。
 func withNoPickGap(t *testing.T) {
 	t.Helper()
